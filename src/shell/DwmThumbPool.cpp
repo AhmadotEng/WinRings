@@ -16,7 +16,7 @@ namespace winrings
         m_instance = instance;
         m_ownerHwnd = ownerHwnd;
         if (!m_bgBrush)
-            m_bgBrush = CreateSolidBrush(RGB(22, 25, 34));
+            m_bgBrush = CreateSolidBrush(RGB(32, 32, 32));
 
         if (!m_classRegistered)
         {

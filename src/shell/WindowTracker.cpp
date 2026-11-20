@@ -316,9 +316,30 @@ namespace winrings
 
     std::wstring WindowTracker::NormalizeAppKey(const std::wstring& exePath, const std::wstring& fallbackName)
     {
-        if (!exePath.empty())
-            return ToLowerCopy(FileNameOf(exePath));
-        return ToLowerCopy(fallbackName);
+        std::wstring raw = !exePath.empty() ? ToLowerCopy(exePath) : ToLowerCopy(fallbackName);
+        for (auto& ch : raw)
+        {
+            if (ch == L'/')
+                ch = L'\\';
+        }
+        return raw;
+    }
+
+    bool WindowTracker::AppKeysMatch(const std::wstring& a, const std::wstring& b)
+    {
+        if (a.empty() || b.empty())
+            return false;
+        if (a == b)
+            return true;
+        const bool aHasSlash = (a.find(L'\\') != std::wstring::npos);
+        const bool bHasSlash = (b.find(L'\\') != std::wstring::npos);
+        if (!aHasSlash || !bHasSlash)
+        {
+            const std::wstring nameA = FileNameOf(a);
+            const std::wstring nameB = FileNameOf(b);
+            return !nameA.empty() && nameA == nameB;
+        }
+        return false;
     }
 
     std::vector<AppWindowGroup> WindowTracker::EnumerateGroupedWindows(HWND ignoreHwnd)

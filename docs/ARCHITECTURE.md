@@ -35,20 +35,29 @@ WinRingsSetup.exe (Single-File Installer)
 
 ---
 
-## 3. Radial Switcher & Live DWM Thumbnail Engine
+## 3. Radial Switcher, Live Acrylic Backdrop & DWM Thumbnail Engine
 
-### 3.1 Direct2D + DirectComposition Ring (`RingOverlay.cpp`)
-- Creates a top-level `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP` overlay window bound to a `IDCompositionDevice` + `IDCompositionTarget` + `IDCompositionVisual` swap chain (`DXGI_ALPHA_MODE_PREMULTIPLIED`).
-- Renders the radial segments, inner deadzone ring (`18 DIP` hit-test radius decoupled from the visual hub), app icons, running-window indicator dots, center label pill, and outer submenu connectors at monitor refresh rate.
-- Supports 6 themes (`LiquidGlass`, `Glass`, `Kiwi`, `Aura`, `Orbit`, `Outline`) and honors `disableOpeningAnimation` (frame-0 instant open) as well as Windows `SPI_GETCLIENTAREAANIMATION`.
+### 3.1 Dual-Swap-Chain Direct2D + DirectComposition + `Windows::UI::Composition` Ring (`RingOverlay.cpp`, `AcrylicBackdrop.cpp`, `RingThemeEngine.h`)
+- Creates a top-level `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP` overlay window (`WinRings.Overlay.v1`).
+- **Live Wallpaper-Reactive Frosted Acrylic (`AcrylicBackdrop.cpp`):**
+  - Enables `DWMWA_USE_HOSTBACKDROPBRUSH` (`17`), `DwmExtendFrameIntoClientArea({-1, -1, -1, -1})`, and `WCA_FORCE_ACTIVEWINDOW_APPEARANCE` (`15`).
+  - Builds a strict-tree `Windows::UI::Composition` effect factory (`GaussianBlur (30 px) -> Saturation -> Blend(D2D1_BLEND_MODE_LUMINOSITY) -> Composite(SOURCE_OVER)`) reading `Compositor::CreateHostBackdropBrush()`.
+  - Clips the desktop acrylic backdrop through `m_acrylicSwapChain` to the true ring annulus (`holeRadius = 60 DIP`, `outerRadius = 148 DIP`, `ringRadius = 112 DIP`), curved outer submenu arcs (`ComputeIconArcLayout`), window preview cards, drop pills, search pill, and center label pill, while rendering crisp icons, typography, tiled `256x256` frosted noise grain (`m_noiseBrush`), and razor-thin `<= 0.85 DIP` hairline rims on `m_fgSwapChain`.
+- **Single Shared Material Engine (`RingThemeEngine.h`):**
+  - `ComputeRingMaterial` and `GenerateAcrylicNoiseBgra256` drive `WinRingsShell.dll`, `WinRingsTools.exe` (`SettingsDialog.cpp` 1:1 GPU preview), and `WinRingsTests.exe` from one source of truth across the 3 visual presets (`A4S`, `DarkWood`, `Blue`), `glassLevel (0–100)`, and `lightDarkMode (0–100)`.
+- Honors `disableOpeningAnimation` (frame-0 instant open) as well as Windows `SPI_GETCLIENTAREAANIMATION`.
 
 ### 3.2 Pooled Non-Layered DWM Thumbnail Windows (`DwmThumbPool.cpp`)
 - Windows `DwmRegisterThumbnail` requires the destination `HWND` to be a top-level window and renders poorly or fails on `WS_EX_LAYERED` windows.
 - `DwmThumbPool` pre-allocates up to 9 non-layered top-level tool windows (`WinRings.ThumbHost`) with `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND` and positions them synchronously along the outer arc (`RadialMath::ComputeOuterArcAngles`) whenever a multi-window slot is hovered.
 
-### 3.3 Hover-Corridor & Direct Slot Switching (`RingOverlay.cpp` & `RadialMath.h`)
-- When an outer-arc submenu is expanded (`m_expandedSlot >= 0`), moving the cursor toward the outer arc keeps the submenu open via `IsPointInSubmenuCorridor`.
-- If the cursor remains inside the main ring annulus (`dist >= ringDeadzoneDip && dist <= outerRadius + 14 DIP`) and moves onto a *different* main ring slot (`ringSlot != m_expandedSlot`), `UpdateHoverFromPoint` immediately switches selection to the new main ring slot instead of locking onto the previous submenu.
+### 3.3 Bounded Main-Ring Hit-Testing & Submenu Hover-Corridor (`RingOverlay.cpp` & `RadialMath.h`)
+- Main-ring slot hover selection is strictly bounded to the ring annulus and icon band (`dist >= ringDeadzoneDip && dist <= outerRadius + 14 DIP`) so moving the cursor out into empty outer space never accidentally activates an unexpanded slot.
+- When an outer-arc submenu is expanded (`m_expandedSlot >= 0`), moving the cursor toward the outer arc keeps the submenu open via `IsPointInSubmenuCorridor`, while moving onto a different main-ring slot inside the annulus switches selection immediately.
+
+### 3.4 System-Wide Application Indexer & Top Half-Ring Search (`AppIndex.cpp` & `SearchMatch.h`)
+- Enumerates Start Menu shortcuts (`.lnk`) and `shell:AppsFolder` applications asynchronously in the background and scores queries via `ScoreSearchCandidate` (exact prefix, word-boundary prefix, substring, and subsequence matching).
+- Typing while the Ring is open renders a floating top search pill (`#515151` border with search icon), highlights any matching pinned or running slot on the main ring, and displays up to 6 matching unpinned system applications in a curved top half-ring.
 
 ---
 

@@ -59,6 +59,7 @@ namespace winrings
         static void MinimizeWindow(HWND hwnd) noexcept;
         static void CloseWindow(HWND hwnd) noexcept;
         static std::wstring NormalizeAppKey(const std::wstring& exePath, const std::wstring& fallbackName);
+        static bool AppKeysMatch(const std::wstring& a, const std::wstring& b);
         static bool IsEligibleWindow(HWND hwnd, HWND shellWindow, HWND ignoreHwnd,
             DWORD selfPid, std::wstring& outTitle, DWORD& outPid, std::wstring& outExePath);
 

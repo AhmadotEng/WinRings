@@ -175,23 +175,34 @@ namespace winrings
                 return 1;
             }
 
-            // Sticky mode navigation & type-to-find without stealing foreground focus
-            if (ringOpen && m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen())
+            // Type-to-find & keyboard navigation whenever the ring is open
+            if (ringOpen)
             {
-                if (kb->vkCode == VK_RETURN)
+                const bool sticky = m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen();
+                const bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                if (kb->vkCode == VK_TAB)
                 {
-                    if (m_callbacks.onCommitRequested) m_callbacks.onCommitRequested();
+                    if (m_callbacks.onArrowStep) m_callbacks.onArrowStep(shiftHeld ? 120 : -120);
                     return 1;
                 }
-                if (kb->vkCode == VK_RIGHT || kb->vkCode == VK_DOWN || kb->vkCode == VK_TAB)
+                if (sticky)
                 {
-                    if (m_callbacks.onArrowStep) m_callbacks.onArrowStep(-120);
-                    return 1;
-                }
-                if (kb->vkCode == VK_LEFT || kb->vkCode == VK_UP)
-                {
-                    if (m_callbacks.onArrowStep) m_callbacks.onArrowStep(120);
-                    return 1;
+                    if (kb->vkCode == VK_RETURN)
+                    {
+                        if (m_callbacks.onCommitRequested) m_callbacks.onCommitRequested();
+                        return 1;
+                    }
+                    if (kb->vkCode == VK_RIGHT || kb->vkCode == VK_DOWN)
+                    {
+                        if (m_callbacks.onArrowStep) m_callbacks.onArrowStep(-120);
+                        return 1;
+                    }
+                    if (kb->vkCode == VK_LEFT || kb->vkCode == VK_UP)
+                    {
+                        if (m_callbacks.onArrowStep) m_callbacks.onArrowStep(120);
+                        return 1;
+                    }
                 }
                 if (kb->vkCode == VK_BACK)
                 {
@@ -202,16 +213,23 @@ namespace winrings
                     ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
                 if (!ctrlOrAlt)
                 {
+                    wchar_t typedChar = 0;
                     if (kb->vkCode >= 'A' && kb->vkCode <= 'Z')
+                        typedChar = static_cast<wchar_t>(L'a' + (kb->vkCode - 'A'));
+                    else if (kb->vkCode >= '0' && kb->vkCode <= '9')
+                        typedChar = static_cast<wchar_t>(L'0' + (kb->vkCode - '0'));
+                    else if (kb->vkCode >= VK_NUMPAD0 && kb->vkCode <= VK_NUMPAD9)
+                        typedChar = static_cast<wchar_t>(L'0' + (kb->vkCode - VK_NUMPAD0));
+                    else if (kb->vkCode == VK_SPACE)
+                        typedChar = L' ';
+                    else if (kb->vkCode == VK_OEM_MINUS || kb->vkCode == VK_SUBTRACT)
+                        typedChar = L'-';
+                    else if (kb->vkCode == VK_OEM_PERIOD || kb->vkCode == VK_DECIMAL)
+                        typedChar = L'.';
+
+                    if (typedChar != 0)
                     {
-                        const wchar_t ch = static_cast<wchar_t>(L'a' + (kb->vkCode - 'A'));
-                        if (m_callbacks.onFilterChar) m_callbacks.onFilterChar(ch);
-                        return 1;
-                    }
-                    if (kb->vkCode >= '0' && kb->vkCode <= '9')
-                    {
-                        const wchar_t ch = static_cast<wchar_t>(L'0' + (kb->vkCode - '0'));
-                        if (m_callbacks.onFilterChar) m_callbacks.onFilterChar(ch);
+                        if (m_callbacks.onFilterChar) m_callbacks.onFilterChar(typedChar);
                         return 1;
                     }
                 }

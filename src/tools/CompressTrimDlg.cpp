@@ -1,6 +1,7 @@
 #include "CompressTrimDlg.h"
 
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <algorithm>
 #include <string>
 
@@ -21,6 +22,7 @@ namespace winrings::tools
             HWND editMb = nullptr;
             HWND editPct = nullptr;
             HBRUSH darkBg = nullptr;
+            HBRUSH editBg = nullptr;
             HFONT font = nullptr;
         };
 
@@ -32,8 +34,27 @@ namespace winrings::tools
             HWND editEnd = nullptr;
             HWND checkCopy = nullptr;
             HBRUSH darkBg = nullptr;
+            HBRUSH editBg = nullptr;
             HFONT font = nullptr;
         };
+
+        void ApplyDarkDialogFrame(HWND hwnd) noexcept
+        {
+            if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            {
+                using SetPreferredAppModeFn = int (WINAPI*)(int);
+                if (auto setMode = reinterpret_cast<SetPreferredAppModeFn>(
+                    GetProcAddress(ux, MAKEINTRESOURCEA(135))))
+                    setMode(2);
+                FreeLibrary(ux);
+            }
+            const BOOL dark = TRUE;
+            DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+            const int corner = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
+            const COLORREF border = RGB(62, 62, 62);
+            DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
+        }
 
         std::wstring GetEditText(HWND edit)
         {
@@ -58,17 +79,18 @@ namespace winrings::tools
 
             case WM_CREATE:
             {
-                const BOOL dark = TRUE;
-                DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-                st->darkBg = CreateSolidBrush(RGB(24, 27, 34));
+                ApplyDarkDialogFrame(hwnd);
+                st->darkBg = CreateSolidBrush(RGB(28, 28, 30));
+                st->editBg = CreateSolidBrush(RGB(46, 46, 52));
                 st->font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
 
                 auto make = [&](const wchar_t* cls, const wchar_t* txt, DWORD style, int x, int y, int w, int h, int id) {
                     HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
                         x, y, w, h, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
                     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
+                    SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
                     return c;
                 };
 
@@ -96,11 +118,21 @@ namespace winrings::tools
             }
 
             case WM_CTLCOLORSTATIC:
+            case WM_CTLCOLORBTN:
             {
                 HDC hdc = reinterpret_cast<HDC>(wp);
-                SetTextColor(hdc, RGB(230, 234, 244));
-                SetBkColor(hdc, RGB(24, 27, 34));
+                SetTextColor(hdc, RGB(244, 244, 246));
+                SetBkColor(hdc, RGB(28, 28, 30));
                 return reinterpret_cast<LRESULT>(st->darkBg);
+            }
+
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+            {
+                HDC hdc = reinterpret_cast<HDC>(wp);
+                SetTextColor(hdc, RGB(244, 244, 246));
+                SetBkColor(hdc, RGB(46, 46, 52));
+                return reinterpret_cast<LRESULT>(st->editBg);
             }
 
             case WM_ERASEBKGND:
@@ -152,6 +184,7 @@ namespace winrings::tools
 
             case WM_DESTROY:
                 if (st->darkBg) { DeleteObject(st->darkBg); st->darkBg = nullptr; }
+                if (st->editBg) { DeleteObject(st->editBg); st->editBg = nullptr; }
                 if (st->font) { DeleteObject(st->font); st->font = nullptr; }
                 PostQuitMessage(0);
                 return 0;
@@ -171,17 +204,18 @@ namespace winrings::tools
 
             case WM_CREATE:
             {
-                const BOOL dark = TRUE;
-                DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-                st->darkBg = CreateSolidBrush(RGB(24, 27, 34));
+                ApplyDarkDialogFrame(hwnd);
+                st->darkBg = CreateSolidBrush(RGB(28, 28, 30));
+                st->editBg = CreateSolidBrush(RGB(46, 46, 52));
                 st->font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
 
                 auto make = [&](const wchar_t* cls, const wchar_t* txt, DWORD style, int x, int y, int w, int h, int id) {
                     HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
                         x, y, w, h, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
                     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
+                    SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
                     return c;
                 };
 
@@ -204,11 +238,21 @@ namespace winrings::tools
             }
 
             case WM_CTLCOLORSTATIC:
+            case WM_CTLCOLORBTN:
             {
                 HDC hdc = reinterpret_cast<HDC>(wp);
-                SetTextColor(hdc, RGB(230, 234, 244));
-                SetBkColor(hdc, RGB(24, 27, 34));
+                SetTextColor(hdc, RGB(244, 244, 246));
+                SetBkColor(hdc, RGB(28, 28, 30));
                 return reinterpret_cast<LRESULT>(st->darkBg);
+            }
+
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+            {
+                HDC hdc = reinterpret_cast<HDC>(wp);
+                SetTextColor(hdc, RGB(244, 244, 246));
+                SetBkColor(hdc, RGB(46, 46, 52));
+                return reinterpret_cast<LRESULT>(st->editBg);
             }
 
             case WM_ERASEBKGND:
@@ -241,6 +285,7 @@ namespace winrings::tools
 
             case WM_DESTROY:
                 if (st->darkBg) { DeleteObject(st->darkBg); st->darkBg = nullptr; }
+                if (st->editBg) { DeleteObject(st->editBg); st->editBg = nullptr; }
                 if (st->font) { DeleteObject(st->font); st->font = nullptr; }
                 PostQuitMessage(0);
                 return 0;

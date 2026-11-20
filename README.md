@@ -31,21 +31,30 @@
 
 ## Key Features
 
-### 1. Radial Switcher (`RingOverlay`, `DwmThumbPool`, `InputEngine`)
-- **Pure Direct2D + DirectComposition Rendering:** Per-pixel alpha composition (`WS_EX_NOREDIRECTIONBITMAP`) with 6 themes (`LiquidGlass`, `Glass`, `Kiwi`, `Aura`, `Orbit`, `Outline`) and custom hex accent color.
+### 1. Radial Switcher (`RingOverlay`, `AcrylicBackdrop`, `RingThemeEngine`, `AppIndex`, `DwmThumbPool`, `InputEngine`)
+- **Live Wallpaper-Reactive A4S Frosted Acrylic (`AcrylicBackdrop` + `RingThemeEngine`):**
+  - Dual-swap-chain Direct2D + DirectComposition + `Windows::UI::Composition` desktop-backdrop pipeline (`DWMWA_USE_HOSTBACKDROPBRUSH`, `DwmExtendFrameIntoClientArea`, `WCA_FORCE_ACTIVEWINDOW_APPEARANCE`) with a strict-tree `GaussianBlur (30 px) -> Saturation -> Blend(D2D1_BLEND_MODE_LUMINOSITY) -> Composite(SOURCE_OVER)` effect graph and tiled `256x256` frosted micro-grain texture.
+  - **3 Visual Style Presets:** **`A4S`** (default A4S-Menu live wallpaper-reactive frosted acrylic with `RGB(32,32,32)` base tint at `128/255` alpha, `#3E3E3E` razor-thin `<= 0.85 DIP` outer/inner hairline rims, and `#34638D` radial pointer reveal), **`DarkWood`** (matte `#202020` dark surface), and **`Blue`** (`#3186FF` sapphire glass), paired with continuous **Glass Level (`0–100%`)** and **Light / Dark Mode (`0–100%`)** sliders.
+  - **True Annulus Geometry:** Clean open center ring (`holeRadius = 60 DIP`, `outerRadius = 148 DIP`, `ringRadius = 112 DIP`, `iconSize = 42 DIP`) with no shaded center disc or cone wedge overlay.
 - **Frame-0 Instant Response:** Opens at full scale on frame 0 (`disableOpeningAnimation = true` by default) and respects Windows `SPI_GETCLIENTAREAANIMATION`.
-- **Decoupled 18 DIP Deadzone:** Tight `18 DIP` inner deadzone (`ringDeadzoneDip = 18.0`) decoupled from the visual center hub for effortless flick selection.
+- **Bounded Annulus + Cone Hit-Testing (`18 DIP` Deadzone):** Tight `18 DIP` inner deadzone (`ringDeadzoneDip = 18.0`) with strictly bounded main-ring hover detection (`dist <= outerRadius + 14 DIP`) so moving into empty outer space never triggers unexpanded slots, while active outer submenus remain reachable through their angular hover corridor.
+- **System-Wide App Search & Top Half-Ring (`AppIndex` + `SearchMatch`):**
+  - Type while the Ring is open in Sticky Mode to display the floating search pill with magnifying-glass icon above the Ring (`#515151` border).
+  - Highlights matching pinned or running apps directly on the main ring (including pinned apps that are not currently running) and opens a **curved top half-ring** (`up to 6 system apps`) indexed from Start Menu shortcuts and `shell:AppsFolder`.
 - **Live Rounded DWM Window Previews:** Pools up to 9 non-layered top-level DWM thumbnail windows (`DWMWCP_ROUND`) around the outer arc for multi-window apps, or switches to a compact `TitleColumn` list view.
 - **Multi-Trigger Input & Dual Activation Modes:**
   - **Mouse Triggers:** `SideBack` (`XButton1`, default), `SideForward` (`XButton2`), `Middle`, or `Right+Left Chord`.
-  - **Quick-Tap vs. Hold-Flick-Release:** Tap `< 180 ms` locks the ring open in **Sticky Mode** (click, type to filter, arrow keys, or press `1–9`); hold `>= 180 ms`, flick toward a slot, and release to switch immediately.
-  - **Double-Tap Last App:** Double-tapping the mouse trigger within `320 ms` jumps straight to your previous foreground application (`Alt+Tab` fast toggle).
+  - **Quick-Tap vs. Hold-Flick-Release:** Tap `< 180 ms` locks the ring open in **Sticky Mode** (click, type to search/filter, arrow keys, or press `1–9`); hold `>= 180 ms`, flick toward a slot, and release to switch immediately.
+  - **Double-Tap Last App:** Double-tapping the mouse trigger within `280 ms` jumps straight to your previous foreground application (`Alt+Tab` fast toggle).
   - **Scroll-Wheel Cycling:** Scroll while the ring is open to cycle windows or slots without leaking `WM_MOUSEWHEEL` to background apps.
   - **Keyboard Triggers:** Configurable global hotkey (`Alt + Space` default), Menu key (`VK_APPS`), and optional `Win + Tab` / `Alt + Tab` shell interception.
-- **Outer-Arc Submenus & Drag-and-Drop Workflows:**
+- **Curved Outer-Arc Submenus & Drag-and-Drop Workflows:**
   - **Multi-Window Fan-Out:** Hover any running app with multiple windows to fan out live DWM previews along the outer arc; middle-click any preview to close that window (`WM_CLOSE`).
-  - **Downloads Fan-Out & OLE Drag-Out:** Hover the pinned `Downloads` folder slot to inspect the 9 newest files/folders and drag any item directly out into another app.
+  - **Curved Half-Ring Downloads & Folder Fan-Out with OLE Drag-Out:** Hover the pinned `Downloads` folder (or any pinned Folder/Collection) to expand a continuous curved frosted acrylic half-ring showing the 9 newest files/items, and drag any item directly out into another app.
   - **Drop Target Actions:** Drag files from Explorer onto Ring slots to launch with a target app, move/copy into a folder, send to `RecycleBin`, convert images/media (`Convert`), or compress/trim/zip/redact (`Actions`).
+- **5-Page Settings Suite with Persistent 1:1 GPU Preview (`WinRingsTools.exe --settings`):**
+  - `1040x660` dark-mode native Win32 + Direct2D 1.1 Settings UI (**Appearance**, **Triggers & Input**, **Top Bar & Clock**, **Pins & Folders**, **Advanced**).
+  - Live 1:1 GPU effect-graph preview shown across **Appearance**, **Pins & Folders**, and **Advanced** using the shared `RingThemeEngine.h`, `RadialMath.h`, frosted noise texture, real extracted shell icons, running dots, and **Split Test** / **Live Desktop** backdrop toggle.
 
 ### 2. Unified Minimal Top Bar (`TopBarHook`, `XamlTaskbarCtrl`)
 - **Top-Edge Docking & Work-Area Reservation:** Docks the native Windows 11 `Shell_TrayWnd` to the top edge of the monitor (`ABE_TOP = 1`) at a compact `28–40 DIP` height (`30 DIP` default) and updates `SPI_GETWORKAREA` (`rcWork.top = 30`) so maximized windows sit cleanly beneath the bar.
@@ -67,13 +76,13 @@
 flowchart LR
     subgraph UserSpace["Out-of-Process Supervisor & Utilities"]
         Host["WinRingsHost.exe<br/>(Tray Host, CrashGuard, CLI)"]
-        Tools["WinRingsTools.exe<br/>(4-Tab Settings, Convert, Trim, Redact)"]
+        Tools["WinRingsTools.exe<br/>(5-Page Settings + 1:1 GPU Preview, Convert, Trim, Redact)"]
         Setup["WinRingsSetup.exe<br/>(SHA-256 Single-File Installer)"]
     end
 
     subgraph ExplorerProc["explorer.exe (In-Process Shell Extension)"]
         Shell["WinRingsShell.dll<br/>(ShellController)"]
-        Ring["RingOverlay + DwmThumbPool<br/>(Direct2D + DirectComposition + DWM)"]
+        Ring["RingOverlay + AcrylicBackdrop + AppIndex + DwmThumbPool<br/>(Direct2D + DirectComposition + Windows.UI.Composition + DWM)"]
         Input["InputEngine<br/>(WH_MOUSE_LL / WH_KEYBOARD_LL / Hotkeys)"]
         Hook["TopBarHook<br/>(Taskbar.dll + SystemTray.dll Detours)"]
         Xaml["XamlTaskbarCtrl<br/>(InitializeXamlDiagnosticsEx + IVisualTreeService3)"]
@@ -94,9 +103,9 @@ flowchart LR
 | Binary | Size | Role |
 | :--- | :--- | :--- |
 | **`WinRingsHost.exe`** | `~280 KB` | Resident supervisor, custom cyan ring tray icon (auto-promoted in `HKCU\Control Panel\NotifyIconSettings`), Explorer injection handshake, 3-crash-in-180s safety circuit breaker, and CLI dispatcher. |
-| **`WinRingsShell.dll`** | `~624 KB` | In-process Explorer module hosting `RingOverlay`, `DwmThumbPool`, `InputEngine`, `WindowTracker`, `SlotModel`, `DropTarget`, `TopBarHook`, and `XamlTaskbarCtrl`. |
-| **`WinRingsTools.exe`** | `~401 KB` | Dark-mode native Win32/Direct2D/WIC 4-tab Settings UI, image/media converter, media compressor/trimmer, `.zip` archiver, and interactive image Redact editor. |
-| **`WinRingsSetup.exe`** | `~1.46 MB` | Self-contained per-user installer embedding all 3 binaries as `RT_RCDATA` with `BCrypt` SHA-256 verification. |
+| **`WinRingsShell.dll`** | `~758 KB` | In-process Explorer module hosting `RingOverlay`, `AcrylicBackdrop`, `RingThemeEngine`, `AppIndex`, `DwmThumbPool`, `InputEngine`, `WindowTracker`, `SlotModel`, `DropTarget`, `TopBarHook`, and `XamlTaskbarCtrl`. |
+| **`WinRingsTools.exe`** | `~486 KB` | Dark-mode native Win32/Direct2D 1.1/WIC 5-page Settings UI (`1040x660` with persistent 1:1 GPU Ring preview), image/media converter, media compressor/trimmer, `.zip` archiver, and interactive image Redact editor. |
+| **`WinRingsSetup.exe`** | `~1.68 MB` | Self-contained per-user installer embedding all 3 binaries as `RT_RCDATA` with `BCrypt` SHA-256 verification. |
 
 ---
 
@@ -137,13 +146,13 @@ If you prefer managing startup items via `shell:startup` (`C:\Users\<User>\AppDa
 
 | Trigger / Action | Default Binding | Behavior |
 | :--- | :--- | :--- |
-| **Quick-Tap (Sticky Mode)** | Tap **Mouse Side Back (`XButton1`)** `< 180 ms` | Opens and locks the Ring on screen. Click any slot, hover outer submenus, type to filter by title, use Arrow keys / `1–9`, or press `Esc` to dismiss. |
+| **Quick-Tap (Sticky Mode)** | Tap **Mouse Side Back (`XButton1`)** `< 180 ms` | Opens and locks the Ring on screen. Click any slot, hover outer submenus, type to search system apps / filter slots, use Arrow keys / `1–9`, or press `Esc` to dismiss. |
 | **Hold-Flick-Release** | Hold **Mouse Side Back (`XButton1`)** `>= 180 ms` | Opens the Ring at cursor; flick outside the `18 DIP` deadzone toward any slot or outer submenu item and release to activate immediately. |
-| **Double-Tap Last App** | Double-tap **Mouse Side Back (`XButton1`)** `< 320 ms` | Instantly switches between your current and previous foreground window. |
+| **Double-Tap Last App** | Double-tap **Mouse Side Back (`XButton1`)** `< 280 ms` | Instantly switches between your current and previous foreground window. |
 | **Keyboard Hotkey** | **`Alt + Space`** | Toggles the Ring in Sticky Mode at the cursor (or monitor center if `Shift` is held). |
 | **Menu Key** | **`VK_APPS`** | Toggles the Ring in Sticky Mode. |
 | **Top-Bar Pill** | Click **`O` Pill** at top-left (`0, 0`) | Toggles the Ring via mouse click on the primary monitor's top bar. |
-| **Tray Icon** | Left-click / Right-click **Cyan Ring Tray Icon** | Left-click opens the Ring; Right-click opens the WinRings menu below the top taskbar (`Open Ring Now`, `Toggle Top Minimal Bar`, `Settings...`, `Reload Config`, `Open Config Folder`, `Exit WinRings`). |
+| **Tray Icon** | Left-click / Right-click **Cyan Ring Tray Icon** | Both left-click and right-click open the WinRings tray menu below the top taskbar (`Open Ring Now`, `Toggle Top Minimal Bar`, `Settings...`, `Reload Config`, `Open Config Folder`, `Exit WinRings`). |
 
 ---
 
@@ -171,7 +180,7 @@ When `topBarEnabled: true` is active in `%APPDATA%\WinRings\config.json`:
 # Toggle the Unified Minimal Top Bar on/off
 & "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsHost.exe" --toggle-topbar
 
-# Open the 4-tab Settings & Pins UI
+# Open the 5-page Settings & Pins UI (with live 1:1 GPU preview)
 & "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsHost.exe" --settings
 
 # Hot-reload %APPDATA%\WinRings\config.json into Explorer
@@ -195,9 +204,10 @@ WinRings stores its configuration at `%APPDATA%\WinRings\config.json` (`C:\Users
 
 ```json
 {
+  "version": 3,
   "mouseTrigger": "SideBack",
   "tapThresholdMs": 180,
-  "doubleTapWindowMs": 320,
+  "doubleTapWindowMs": 280,
   "doubleTapLastApp": true,
   "scrollWheelMode": "CycleWindows",
   "hotkeyEnabled": true,
@@ -207,11 +217,13 @@ WinRings stores its configuration at `%APPDATA%\WinRings\config.json` (`C:\Users
   "interceptWinTab": false,
   "interceptAltTab": false,
   "topBarRingButton": true,
-  "theme": "LiquidGlass",
-  "accentColor": "#3186FF",
-  "ringRadiusDip": 134.0,
+  "theme": "A4S",
+  "glassLevel": 50,
+  "lightDarkMode": 0,
+  "accentColor": "#0078D4",
+  "ringRadiusDip": 112.0,
   "ringDeadzoneDip": 18.0,
-  "iconSizeDip": 28.0,
+  "iconSizeDip": 42.0,
   "disableOpeningAnimation": true,
   "windowSubmenuView": "OuterArc",
   "fanOutSingleWindow": false,
@@ -219,7 +231,7 @@ WinRings stores its configuration at `%APPDATA%\WinRings\config.json` (`C:\Users
   "pointerFollow": false,
   "shiftCenterOnActiveMonitor": true,
   "includeUnpinnedRunningApps": true,
-  "maxSlots": 10,
+  "maxSlots": 14,
   "topBarEnabled": true,
   "topBarDockTop": true,
   "topBarHeightDip": 30,

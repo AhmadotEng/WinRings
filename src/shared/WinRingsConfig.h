@@ -32,12 +32,9 @@ namespace winrings
 
     enum class RingTheme
     {
-        LiquidGlass,
-        Glass,
-        Kiwi,
-        Aura,
-        Orbit,
-        Outline
+        A4S,       // "A4S Menu" (Default — live environment-reactive frosted acrylic)
+        DarkWood,  // "Dark Wood" (previous matte #202020 look, renamed)
+        Blue       // "Blue" (re-added classic #3186FF glass look)
     };
 
     enum class TopBarBackdrop
@@ -71,7 +68,7 @@ namespace winrings
 
     struct SwitcherConfig
     {
-        int version = 1;
+        int version = 3;
 
         // Triggers & Input
         MouseTriggerButton mouseTrigger = MouseTriggerButton::SideBack;
@@ -89,14 +86,16 @@ namespace winrings
 
         // Ring Geometry, Look & Behavior
         double deadzoneDip = 18.0;
-        double ringRadiusDip = 112.0;
-        double iconSizeDip = 42.0;
+        double ringRadiusDip = 115.0;
+        double iconSizeDip = 44.0;
         double thumbnailScale = 1.0;
         bool disableOpeningAnimation = true;
         WindowViewMode windowViewMode = WindowViewMode::OuterArc;
         bool fanOutSingleWindow = true;
-        RingTheme theme = RingTheme::LiquidGlass;
-        std::wstring accentColor = L"#3186FF";
+        RingTheme theme = RingTheme::A4S;
+        int glassLevel = 50;
+        int lightDarkMode = 0;
+        std::wstring accentColor = L"#0078D4";
         bool pointerFollow = true;
         bool shiftCenterOnActiveMonitor = true;
         bool includeUnpinnedRunningApps = true;

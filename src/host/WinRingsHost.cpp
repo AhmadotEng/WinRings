@@ -1385,6 +1385,22 @@ namespace
         }
     }
 
+    void EnableDarkWin32Menus() noexcept
+    {
+        if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+        {
+            using SetPreferredAppModeFn = int (WINAPI*)(int);
+            using FlushMenuThemesFn = void (WINAPI*)();
+            if (auto setMode = reinterpret_cast<SetPreferredAppModeFn>(
+                GetProcAddress(ux, MAKEINTRESOURCEA(135))))
+                setMode(2); // AllowDark
+            if (auto flush = reinterpret_cast<FlushMenuThemesFn>(
+                GetProcAddress(ux, MAKEINTRESOURCEA(136))))
+                flush();
+            FreeLibrary(ux);
+        }
+    }
+
     void ShowTrayContextMenu(HWND hwnd)
     {
         POINT pt{};
@@ -1402,6 +1418,7 @@ namespace
         AppendMenuW(menu, MF_STRING, kMenuCmdConfigFolder, L"Open Config Folder");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuCmdExit, L"Exit WinRings");
+        SetMenuDefaultItem(menu, kMenuCmdSettings, FALSE);
 
         UINT menuFlags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
         if (cfgNow.topBarEnabled && cfgNow.topBarDockTop)
@@ -1565,10 +1582,8 @@ namespace
         switch (message)
         {
         case kTrayCallbackMsg:
-            if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
+            if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
                 ShowTrayContextMenu(window);
-            else if (lParam == WM_LBUTTONUP && g_runtime.status == WINRINGS_HOST_STATUS_READY)
-                SendShellCommand(WINRINGS_CMD_TOGGLE_RING);
             return 0;
 
         case WM_WTSSESSION_CHANGE:
@@ -1834,6 +1849,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         ReleaseMutex(instanceMutex.get());
         return static_cast<int>(GetLastError());
     }
+
+    EnableDarkWin32Menus();
 
     g_runtime.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         WINRINGS_HOST_WINDOW_CLASS_W, WINRINGS_HOST_WINDOW_TITLE_W, WS_POPUP,

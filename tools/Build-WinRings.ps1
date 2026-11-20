@@ -65,7 +65,7 @@ $bat2 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 rc /nologo /fo "$root\build\obj\shell\WinRingsShell.res" "$root\src\shell\WinRingsShell.rc" || exit /b 1
-cl $cflags /DWINRINGS_SHELL_EXPORTS /Fo"$root\build\obj\shell\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\shell\WindowTracker.cpp" "$root\src\shell\SlotModel.cpp" "$root\src\shell\DwmThumbPool.cpp" "$root\src\shell\InputEngine.cpp" "$root\src\shell\DropTarget.cpp" "$root\src\shell\RingOverlay.cpp" "$root\src\shell\TopBarHook.cpp" "$root\src\shell\XamlTaskbarCtrl.cpp" "$root\src\shell\ShellController.cpp" "$root\src\shell\DllMain.cpp" /link /DLL /DEF:"$root\src\shell\WinRingsShell.def" /SUBSYSTEM:WINDOWS $lflags /OUT:"$root\build\bin\WinRingsShell.dll" "$root\build\obj\shell\WinRingsShell.res" d3d11.lib d2d1.lib dwrite.lib dcomp.lib dxgi.lib dwmapi.lib windowscodecs.lib winhttp.lib ole32.lib oleaut32.lib shell32.lib shlwapi.lib uxtheme.lib propsys.lib comctl32.lib user32.lib gdi32.lib advapi32.lib windowsapp.lib runtimeobject.lib || exit /b 1
+cl $cflags /DWINRINGS_SHELL_EXPORTS /Fo"$root\build\obj\shell\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\shell\AcrylicBackdrop.cpp" "$root\src\shell\AppIndex.cpp" "$root\src\shell\WindowTracker.cpp" "$root\src\shell\SlotModel.cpp" "$root\src\shell\DwmThumbPool.cpp" "$root\src\shell\InputEngine.cpp" "$root\src\shell\DropTarget.cpp" "$root\src\shell\RingOverlay.cpp" "$root\src\shell\TopBarHook.cpp" "$root\src\shell\XamlTaskbarCtrl.cpp" "$root\src\shell\ShellController.cpp" "$root\src\shell\DllMain.cpp" /link /DLL /DEF:"$root\src\shell\WinRingsShell.def" /SUBSYSTEM:WINDOWS $lflags /OUT:"$root\build\bin\WinRingsShell.dll" "$root\build\obj\shell\WinRingsShell.res" d3d11.lib d2d1.lib dwrite.lib dcomp.lib dxgi.lib dxguid.lib dwmapi.lib windowscodecs.lib winhttp.lib ole32.lib oleaut32.lib shell32.lib shlwapi.lib uxtheme.lib propsys.lib version.lib comctl32.lib user32.lib gdi32.lib advapi32.lib windowsapp.lib runtimeobject.lib || exit /b 1
 "@
 Invoke-VcBat $bat2 'shell'
 
@@ -83,7 +83,7 @@ $bat4 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 rc /nologo /fo "$root\build\obj\tools\WinRingsTools.res" "$root\src\tools\WinRingsTools.rc" || exit /b 1
-cl $cflags /Fo"$root\build\obj\tools\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\tools\DropActions.cpp" "$root\src\tools\CompressTrimDlg.cpp" "$root\src\tools\RedactEditor.cpp" "$root\src\tools\SettingsDialog.cpp" "$root\src\tools\WinRingsTools.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\tools\WinRingsTools.manifest" $lflags /OUT:"$root\build\bin\WinRingsTools.exe" "$root\build\obj\tools\WinRingsTools.res" d2d1.lib dwrite.lib dwmapi.lib windowscodecs.lib comctl32.lib comdlg32.lib shell32.lib shlwapi.lib ole32.lib uxtheme.lib user32.lib gdi32.lib advapi32.lib || exit /b 1
+cl $cflags /Fo"$root\build\obj\tools\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\tools\DropActions.cpp" "$root\src\tools\CompressTrimDlg.cpp" "$root\src\tools\RedactEditor.cpp" "$root\src\tools\SettingsDialog.cpp" "$root\src\tools\WinRingsTools.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\tools\WinRingsTools.manifest" $lflags /OUT:"$root\build\bin\WinRingsTools.exe" "$root\build\obj\tools\WinRingsTools.res" d3d11.lib d2d1.lib dwrite.lib dxgi.lib dxguid.lib dwmapi.lib windowscodecs.lib comctl32.lib comdlg32.lib shell32.lib shlwapi.lib ole32.lib uxtheme.lib user32.lib gdi32.lib advapi32.lib || exit /b 1
 "@
 Invoke-VcBat $bat4 'tools'
 

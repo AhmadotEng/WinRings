@@ -1,6 +1,7 @@
 #include "SlotModel.h"
 
 #include <ShlObj.h>
+#include <ShObjIdl.h>
 #include <Shellapi.h>
 #include <winhttp.h>
 #include <algorithm>
@@ -8,10 +9,82 @@
 #include <thread>
 #include <unordered_set>
 
+#include "../shared/SearchMatch.h"
+#include "AppIndex.h"
+
 namespace winrings
 {
     namespace
     {
+        std::wstring FileStemOfPath(const std::wstring& path)
+        {
+            const size_t slash = path.find_last_of(L"\\/");
+            std::wstring name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+            const size_t dot = name.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot > 0)
+                name.resize(dot);
+            return name;
+        }
+
+        std::wstring ParentFolderNameOf(const std::wstring& path)
+        {
+            const size_t slash = path.find_last_of(L"\\/");
+            if (slash == std::wstring::npos || slash == 0)
+                return {};
+            const size_t prevSlash = path.find_last_of(L"\\/", slash - 1);
+            if (prevSlash == std::wstring::npos)
+                return {};
+            std::wstring folder = path.substr(prevSlash + 1, slash - prevSlash - 1);
+            if (_wcsicmp(folder.c_str(), L"Application") == 0 ||
+                _wcsicmp(folder.c_str(), L"bin") == 0 ||
+                _wcsicmp(folder.c_str(), L"x64") == 0 ||
+                _wcsicmp(folder.c_str(), L"win64") == 0 ||
+                _wcsicmp(folder.c_str(), L"Program Files") == 0 ||
+                _wcsicmp(folder.c_str(), L"Program Files (x86)") == 0 ||
+                _wcsicmp(folder.c_str(), L"System32") == 0 ||
+                _wcsicmp(folder.c_str(), L"Windows") == 0)
+            {
+                return ParentFolderNameOf(path.substr(0, slash));
+            }
+            return folder;
+        }
+
+        void AddAliasUnique(std::vector<std::wstring>& aliases, const std::wstring& value)
+        {
+            const std::wstring t = TrimCopyW(value);
+            if (t.empty())
+                return;
+            const std::wstring low = ToLowerFold(t);
+            for (const auto& existing : aliases)
+            {
+                if (ToLowerFold(existing) == low)
+                    return;
+            }
+            aliases.push_back(t);
+        }
+
+        void PopulateSearchAliases(RingSlot& slot, const std::wstring& configuredLabel,
+            const std::wstring& exePath, const AppIndex* appIndex)
+        {
+            AddAliasUnique(slot.searchAliases, slot.label);
+            AddAliasUnique(slot.searchAliases, configuredLabel);
+            if (!exePath.empty())
+            {
+                const std::wstring stem = FileStemOfPath(exePath);
+                AddAliasUnique(slot.searchAliases, stem);
+                AddAliasUnique(slot.searchAliases, AppIndex::ResolveExecutableFriendlyName(exePath));
+                if (appIndex)
+                    AddAliasUnique(slot.searchAliases, appIndex->FindFriendlyNameForExe(exePath));
+                const std::wstring parent = ParentFolderNameOf(exePath);
+                if (!parent.empty() && parent.size() <= 40)
+                    AddAliasUnique(slot.searchAliases, parent);
+            }
+            for (const auto& w : slot.windows)
+                AddAliasUnique(slot.searchAliases, w.title);
+            for (const auto& sub : slot.subItems)
+                AddAliasUnique(slot.searchAliases, sub.label);
+        }
+
         std::wstring InferLabel(SlotKind kind, const std::wstring& pathOrUrl)
         {
             if (kind == SlotKind::RecycleBin)
@@ -106,7 +179,8 @@ namespace winrings
             });
 
             const int limit = std::clamp(maxItems, 1, 9);
-            for (int i = 0; i < static_cast<int>(entries.size()) && i < limit; ++i)
+            const int fileLimit = (limit >= 2) ? (std::min)(limit, 7) : limit;
+            for (int i = 0; i < static_cast<int>(entries.size()) && i < fileLimit; ++i)
             {
                 RingSlot sub;
                 sub.id = L"file-" + std::to_wstring(i);
@@ -117,6 +191,17 @@ namespace winrings
                 sub.isPinned = false;
                 folderSlot.subItems.push_back(std::move(sub));
             }
+            if (limit >= 2)
+            {
+                RingSlot openDir;
+                openDir.id = L"folder-open";
+                openDir.kind = SlotKind::Folder;
+                openDir.label = L"Open in Explorer";
+                openDir.pathOrUrl = folderPath;
+                openDir.iconBitmap = tracker.GetStockIconBitmap(SIID_FOLDER);
+                openDir.isPinned = false;
+                folderSlot.subItems.push_back(std::move(openDir));
+            }
         }
 
         RingSlot CreateSlotFromConfig(
@@ -124,7 +209,8 @@ namespace winrings
             const std::vector<AppWindowGroup>& running,
             std::unordered_set<std::wstring>& consumedKeys,
             WindowTracker& tracker,
-            IWICImagingFactory* wicFactory)
+            IWICImagingFactory* wicFactory,
+            const AppIndex* appIndex)
         {
             const std::wstring expanded = SlotModel::ExpandEnv(cfg.pathOrUrl);
             RingSlot slot;
@@ -135,23 +221,36 @@ namespace winrings
             slot.isPinned = true;
             slot.maxFolderItems = std::clamp(cfg.maxFolderItems, 1, 9);
 
+            std::wstring resolvedExePath = expanded;
             if (cfg.kind == SlotKind::App)
             {
                 const std::wstring key = WindowTracker::NormalizeAppKey(expanded, cfg.label);
                 bool matched = false;
                 for (const auto& grp : running)
                 {
-                    if (grp.normalizedKey == key)
+                    if (WindowTracker::AppKeysMatch(grp.normalizedKey, key))
                     {
                         slot.windows = grp.windows;
+                        if (!grp.exePath.empty())
+                            resolvedExePath = grp.exePath;
                         slot.iconBitmap = grp.iconBitmap ? grp.iconBitmap : tracker.GetShellIconBitmap(expanded);
-                        consumedKeys.insert(key);
+                        consumedKeys.insert(grp.normalizedKey);
                         matched = true;
                         break;
                     }
                 }
                 if (!matched)
                     slot.iconBitmap = tracker.GetShellIconBitmap(expanded);
+
+                const std::wstring stem = FileStemOfPath(resolvedExePath);
+                std::wstring friendly = appIndex ? appIndex->FindFriendlyNameForExe(resolvedExePath) : L"";
+                if (friendly.empty())
+                    friendly = AppIndex::ResolveExecutableFriendlyName(resolvedExePath);
+                if (!friendly.empty() &&
+                    (cfg.label.empty() || _wcsicmp(cfg.label.c_str(), stem.c_str()) == 0))
+                {
+                    slot.label = friendly;
+                }
             }
             else if (cfg.kind == SlotKind::File || cfg.kind == SlotKind::Folder || cfg.kind == SlotKind::Script)
             {
@@ -177,8 +276,21 @@ namespace winrings
             {
                 slot.iconBitmap = tracker.GetStockIconBitmap(SIID_FOLDER);
                 for (const auto& child : cfg.items)
-                    slot.subItems.push_back(CreateSlotFromConfig(child, running, consumedKeys, tracker, wicFactory));
+                    slot.subItems.push_back(CreateSlotFromConfig(child, running, consumedKeys, tracker, wicFactory, appIndex));
             }
+
+            const HWND frontmost = tracker.LastActiveWindow();
+            for (const auto& w : slot.windows)
+            {
+                if (frontmost && w.hwnd == frontmost)
+                {
+                    slot.isFrontmost = true;
+                    break;
+                }
+            }
+
+            PopulateSearchAliases(slot, cfg.label,
+                cfg.kind == SlotKind::App ? resolvedExePath : std::wstring(), appIndex);
             return slot;
         }
     } // namespace
@@ -203,9 +315,11 @@ namespace winrings
         HWND ignoreHwnd,
         const SwitcherConfig& config,
         WindowTracker& tracker,
-        IWICImagingFactory* wicFactory)
+        IWICImagingFactory* wicFactory,
+        const AppIndex* appIndex)
     {
         const auto running = tracker.EnumerateGroupedWindows(ignoreHwnd);
+        const HWND frontmost = tracker.LastActiveWindow();
         std::vector<RingSlot> slots;
         std::unordered_set<std::wstring> consumedKeys;
 
@@ -213,7 +327,7 @@ namespace winrings
         {
             if (static_cast<int>(slots.size()) >= config.maxSlots)
                 break;
-            slots.push_back(CreateSlotFromConfig(pinned, running, consumedKeys, tracker, wicFactory));
+            slots.push_back(CreateSlotFromConfig(pinned, running, consumedKeys, tracker, wicFactory, appIndex));
         }
 
         if (config.includeUnpinnedRunningApps)
@@ -227,11 +341,23 @@ namespace winrings
                 RingSlot s;
                 s.id = L"run-" + grp.normalizedKey;
                 s.kind = SlotKind::App;
-                s.label = grp.processName;
+                std::wstring friendly = appIndex ? appIndex->FindFriendlyNameForExe(grp.exePath) : L"";
+                if (friendly.empty() && !grp.exePath.empty())
+                    friendly = AppIndex::ResolveExecutableFriendlyName(grp.exePath);
+                s.label = !friendly.empty() ? friendly : grp.processName;
                 s.pathOrUrl = grp.exePath;
                 s.iconBitmap = grp.iconBitmap;
                 s.isPinned = false;
                 s.windows = grp.windows;
+                for (const auto& w : s.windows)
+                {
+                    if (frontmost && w.hwnd == frontmost)
+                    {
+                        s.isFrontmost = true;
+                        break;
+                    }
+                }
+                PopulateSearchAliases(s, grp.processName, grp.exePath, appIndex);
                 slots.push_back(std::move(s));
             }
         }
@@ -243,6 +369,29 @@ namespace winrings
     {
         if (pathOrUrl.empty())
             return;
+
+        constexpr const wchar_t* kAppsPrefix = L"shell:AppsFolder\\";
+        if (arguments.empty() && pathOrUrl.rfind(kAppsPrefix, 0) == 0)
+        {
+            const std::wstring aumid = pathOrUrl.substr(wcslen(kAppsPrefix));
+            Microsoft::WRL::ComPtr<IApplicationActivationManager> aam;
+            if (SUCCEEDED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
+                CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(aam.GetAddressOf()))) && aam)
+            {
+                DWORD pid = 0;
+                if (SUCCEEDED(aam->ActivateApplication(aumid.c_str(), nullptr, AO_NONE, &pid)))
+                    return;
+            }
+            SHELLEXECUTEINFOW seiApp{ sizeof(seiApp) };
+            seiApp.fMask = SEE_MASK_FLAG_NO_UI;
+            seiApp.lpVerb = L"open";
+            seiApp.lpFile = L"explorer.exe";
+            seiApp.lpParameters = pathOrUrl.c_str();
+            seiApp.nShow = SW_SHOWNORMAL;
+            ShellExecuteExW(&seiApp);
+            return;
+        }
+
         SHELLEXECUTEINFOW sei{ sizeof(sei) };
         sei.fMask = SEE_MASK_FLAG_NO_UI;
         sei.lpVerb = L"open";

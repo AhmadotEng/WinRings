@@ -103,10 +103,126 @@ namespace winrings
         return radians;
     }
 
+    struct RingGeometry
+    {
+        double iconSize = 46.0;
+        double ringRadius = 114.6;
+        double outerRadius = 149.6;
+        double holeRadius = 81.6;
+        double bandRadius = 91.6;
+        double runningDotRadius = 85.6;
+    };
+
     inline double MainRingOuterRadius(double ringRadiusDip, double iconSizeDip) noexcept
     {
-        const double selectedBadgeRadius = (iconSizeDip + 14.0) * 0.5 * 1.24;
-        return ringRadiusDip + (std::max)(38.0, selectedBadgeRadius);
+        return ringRadiusDip + iconSizeDip * 0.5 + 12.0;
+    }
+
+    inline RingGeometry ComputeRingGeometry(
+        int slotCount,
+        double configRingRadiusDip,
+        double configIconSizeDip,
+        double deadzoneDip) noexcept
+    {
+        RingGeometry g{};
+        double icon = std::clamp(configIconSizeDip, 32.0, 56.0);
+        if (slotCount >= 13)
+            icon = (std::min)(icon, 40.0);
+        else if (slotCount >= 9)
+            icon = (std::min)(icon, 46.0);
+
+        const double minNeeded = (slotCount > 0)
+            ? ((icon + 14.0) * static_cast<double>(slotCount)) / kTwoPi
+            : 88.0;
+        g.iconSize = icon;
+        g.ringRadius = (std::max)({ 88.0, configRingRadiusDip, minNeeded });
+        g.outerRadius = MainRingOuterRadius(g.ringRadius, g.iconSize);
+        g.holeRadius = (std::max)(deadzoneDip + 8.0, g.ringRadius - g.iconSize * 0.5 - 10.0);
+        g.bandRadius = (std::max)(g.holeRadius + 4.0, g.ringRadius - g.iconSize * 0.5);
+        g.runningDotRadius = (std::max)(g.holeRadius + 4.0, g.ringRadius - g.iconSize * 0.5 - 6.0);
+        return g;
+    }
+
+    struct IconArcLayout
+    {
+        double arcRadius = 0.0;
+        double startAngleRad = 0.0;
+        double endAngleRad = 0.0;
+        double trackWidthDip = 56.0;
+        std::vector<double> angles;
+        std::vector<RectD> rects;
+    };
+
+    /// Computes a continuous curved half-ring icon layout (`40x40 DIP` items on a `56 DIP` wide arc track).
+    inline IconArcLayout ComputeIconArcLayout(
+        double centerX,
+        double centerY,
+        double baseAngleRad,
+        double mainRingOuterR,
+        int itemCount,
+        double itemSizeDip = 40.0,
+        double clearanceDip = 12.0,
+        double maxSpanRad = 4.01426,
+        bool alternatingFromCenter = false)
+    {
+        IconArcLayout out{};
+        const int count = std::clamp(itemCount, 0, 12);
+        if (count <= 0)
+            return out;
+
+        double arcR = mainRingOuterR + 26.0 + itemSizeDip * 0.5;
+        double step = (itemSizeDip + clearanceDip) / arcR;
+
+        if (count > 1)
+        {
+            for (int iter = 0; iter < 3; ++iter)
+            {
+                step = (itemSizeDip + clearanceDip) / arcR;
+                const double span = static_cast<double>(count - 1) * step;
+                if (span <= maxSpanRad)
+                    break;
+                arcR = (std::min)(arcR * (span / maxSpanRad), mainRingOuterR + 120.0);
+            }
+            const double maxAllowedStep = maxSpanRad / static_cast<double>(count - 1);
+            step = (std::min)(step, maxAllowedStep);
+        }
+
+        out.arcRadius = arcR;
+        out.trackWidthDip = itemSizeDip + 16.0; // 40 + 16 = 56 DIP wide continuous arc track
+        out.angles.reserve(static_cast<size_t>(count));
+        out.rects.reserve(static_cast<size_t>(count));
+
+        double minDelta = 0.0;
+        double maxDelta = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            double delta = 0.0;
+            if (alternatingFromCenter)
+            {
+                const int offset = (i == 0) ? 0 : ((i + 1) / 2) * ((i % 2 == 1) ? -1 : 1);
+                delta = static_cast<double>(offset) * step;
+            }
+            else
+            {
+                delta = (static_cast<double>(i) - static_cast<double>(count - 1) * 0.5) * step;
+            }
+            if (i == 0 || delta < minDelta) minDelta = delta;
+            if (i == 0 || delta > maxDelta) maxDelta = delta;
+
+            const double a = baseAngleRad + delta;
+            const double cx = centerX + arcR * std::cos(a);
+            const double cy = centerY + arcR * std::sin(a);
+            out.angles.push_back(a);
+            out.rects.push_back(RectD{
+                cx - itemSizeDip * 0.5,
+                cy - itemSizeDip * 0.5,
+                itemSizeDip,
+                itemSizeDip
+            });
+        }
+        out.startAngleRad = baseAngleRad + minDelta;
+        out.endAngleRad = baseAngleRad + maxDelta;
+        return out;
     }
 
     inline std::vector<RectD> ComputeFolderSubmenuRects(
@@ -116,25 +232,13 @@ namespace winrings
         double ringRadiusDip,
         double iconSizeDip,
         int itemCount,
-        double badgeSizeDip = 52.0,
-        double angularStepRad = 0.30)
+        double badgeSizeDip = 40.0,
+        bool alternatingFromCenter = false)
     {
-        const int count = std::clamp(itemCount, 0, 9);
-        const double minClearR = MainRingOuterRadius(ringRadiusDip, iconSizeDip) + 12.0 + badgeSizeDip * 0.5 * 1.12;
-        const double outerR = (std::max)(ringRadiusDip + 96.0, minClearR);
-        const auto centers = GetOuterArcCenters(centerX, centerY, baseAngleRad, outerR, count, angularStepRad);
-        std::vector<RectD> rects;
-        rects.reserve(centers.size());
-        for (const auto& c : centers)
-        {
-            rects.push_back(RectD{
-                c.x - badgeSizeDip * 0.5,
-                c.y - badgeSizeDip * 0.5,
-                badgeSizeDip,
-                badgeSizeDip
-            });
-        }
-        return rects;
+        const double mainOuterR = MainRingOuterRadius(ringRadiusDip, iconSizeDip);
+        return ComputeIconArcLayout(
+            centerX, centerY, baseAngleRad, mainOuterR,
+            itemCount, badgeSizeDip, 12.0, 4.01426, alternatingFromCenter).rects;
     }
 
     inline std::vector<RectD> ComputeWindowOuterArcRects(
@@ -148,12 +252,15 @@ namespace winrings
         double angularStepRad = 0.36)
     {
         const int count = std::clamp(itemCount, 0, 9);
-        const double cardW = 108.0 * thumbnailScale;
-        const double cardH = 74.0 * thumbnailScale;
+        const double cardW = 104.0 * thumbnailScale;
+        const double cardH = 68.0 * thumbnailScale;
         const double cardHalfDiag = 0.5 * std::hypot(cardW, cardH);
-        const double minClearR = MainRingOuterRadius(ringRadiusDip, iconSizeDip) + 6.0 + cardHalfDiag;
-        const double outerR = (std::max)(ringRadiusDip + 108.0 * thumbnailScale, minClearR);
-        const auto centers = GetOuterArcCenters(centerX, centerY, baseAngleRad, outerR, count, angularStepRad);
+        const double mainOuterR = MainRingOuterRadius(ringRadiusDip, iconSizeDip);
+        const double outerR = (std::max)(mainOuterR + 26.0 + 0.5 * (std::max)(cardW, cardH),
+                                         mainOuterR + 8.0 + cardHalfDiag);
+        const double neededStep = (cardW * 0.92 + 10.0) / outerR;
+        const double step = (std::clamp)((std::max)(angularStepRad, neededStep), 0.24, 0.52);
+        const auto centers = GetOuterArcCenters(centerX, centerY, baseAngleRad, outerR, count, step);
         std::vector<RectD> rects;
         rects.reserve(centers.size());
         for (const auto& c : centers)
@@ -434,7 +541,8 @@ namespace winrings
         PointD corridorOrigin,
         const std::vector<RectD>& submenuCardRects,
         RectD submenuBounds,
-        bool submenuIsTitleColumn) noexcept
+        bool submenuIsTitleColumn,
+        double mainRingOuterReachDip = 12.0) noexcept
     {
         RingHoverResult res{};
         if (slotCount <= 0)
@@ -444,7 +552,7 @@ namespace winrings
         const double dy = cursor.y - center.y;
         const double distFromCenter = std::hypot(dx, dy);
 
-        // 1. Center deadzone always deselects and collapses any open submenu.
+        // 1. Center deadzone always deselects and collapses any open submenu (except search mode handled by caller).
         if (distFromCenter <= deadzoneDip)
             return res;
 
@@ -452,8 +560,8 @@ namespace winrings
         const double mainRingOuterR = MainRingOuterRadius(ringRadiusDip, iconSizeDip);
 
         // 2. Direct hover over any OTHER main-ring slot icon immediately switches away,
-        //    even under extreme ring radii where a clamped submenu could approach the ring.
-        if (expandedSlotIndex >= 0 && expandedSlotIndex < slotCount)
+        //    even if a submenu or top search half-ring is currently open.
+        if ((expandedSlotIndex >= 0 && expandedSlotIndex < slotCount) || expandedSlotIndex == -2)
         {
             int directOtherSlot = -1;
             double bestDist = slotBadgeRadius;
@@ -473,13 +581,14 @@ namespace winrings
             {
                 res.selectedSlot = directOtherSlot;
                 res.selectedSubIndex = -1;
-                res.keepExistingSubmenu = false;
+                res.keepExistingSubmenu = (expandedSlotIndex == -2);
                 return res;
             }
         }
 
-        // 3. Submenu card hit and outer submenu zone/corridor (strictly outside mainRingOuterR).
-        if (expandedSlotIndex >= 0 && expandedSlotIndex < slotCount && !submenuCardRects.empty())
+        // 3. Submenu / Top-Search-Arc card hit and outer submenu zone/corridor (strictly outside mainRingOuterR).
+        if (((expandedSlotIndex >= 0 && expandedSlotIndex < slotCount) || expandedSlotIndex == -2) &&
+            !submenuCardRects.empty())
         {
             const int hitSub = HitTestRects(cursor, submenuCardRects);
             if (hitSub >= 0)
@@ -490,7 +599,9 @@ namespace winrings
                 return res;
             }
 
-            const double expandedAngle = GetSlotAngle(expandedSlotIndex, slotCount);
+            const double expandedAngle = (expandedSlotIndex == -2)
+                ? (-kPi * 0.5)
+                : GetSlotAngle(expandedSlotIndex, slotCount);
             if (IsPointInOuterSubmenuZone(
                 cursor,
                 center,
@@ -508,11 +619,16 @@ namespace winrings
             }
         }
 
-        // 4. Main-ring sector selection (always reachable across main ring and outside submenu zone).
+        // 4. Outer boundary cap: hovering far outside the ring MUST NOT select unhovered apps
+        //    or summon their invisible PiPs. Only [deadzoneDip, mainRingOuterR + mainRingOuterReachDip]
+        //    selects a main-ring slot via its angular cone.
+        if (distFromCenter > mainRingOuterR + (std::max)(0.0, mainRingOuterReachDip))
+            return res;
+
         const int nextSlot = CalculateSectorIndex(dx, dy, slotCount, deadzoneDip);
         res.selectedSlot = nextSlot;
         res.selectedSubIndex = -1;
-        res.keepExistingSubmenu = (nextSlot >= 0 && nextSlot == expandedSlotIndex);
+        res.keepExistingSubmenu = (nextSlot >= 0 && nextSlot == expandedSlotIndex) || (expandedSlotIndex == -2);
         res.updateCorridorOrigin = (nextSlot >= 0 && nextSlot == currentSelectedSlot && distFromCenter <= mainRingOuterR);
         return res;
     }

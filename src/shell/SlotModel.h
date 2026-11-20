@@ -12,6 +12,8 @@
 
 namespace winrings
 {
+    class AppIndex;
+
     struct RingSlot
     {
         std::wstring id;
@@ -20,9 +22,11 @@ namespace winrings
         std::wstring pathOrUrl;
         Microsoft::WRL::ComPtr<IWICBitmapSource> iconBitmap;
         bool isPinned = false;
+        bool isFrontmost = false;
         int maxFolderItems = 8;
         std::vector<WindowEntry> windows;
         std::vector<RingSlot> subItems;
+        std::vector<std::wstring> searchAliases;
 
         bool IsRunning() const noexcept { return !windows.empty(); }
         bool HasSubmenu(bool fanOutSingleWindow) const noexcept
@@ -39,7 +43,8 @@ namespace winrings
             HWND ignoreHwnd,
             const SwitcherConfig& config,
             WindowTracker& tracker,
-            IWICImagingFactory* wicFactory);
+            IWICImagingFactory* wicFactory,
+            const AppIndex* appIndex = nullptr);
 
         static void LaunchPathOrUrl(const std::wstring& pathOrUrl, const std::wstring& arguments = L"");
         static void RevealInExplorer(const std::wstring& path);

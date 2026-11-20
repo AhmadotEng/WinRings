@@ -5,46 +5,31 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <unordered_set>
 
+#include "../shared/SearchMatch.h"
 #include "../shared/WinRingsIdentity.h"
+#include "AppIndex.h"
 
 namespace winrings
 {
     namespace
     {
-        constexpr double kOverlayDip = 680.0;
+        constexpr double kOverlayDip = 760.0;
         constexpr double kCenterDip = kOverlayDip * 0.5;
         constexpr UINT_PTR kAnimTimerId = 101;
         constexpr UINT kAnimIntervalMs = 16;
         constexpr double kOpenDurationMs = 120.0;
+        constexpr double kIdleSlotScale = 0.90;
+        constexpr double kSelectedSlotScale = 1.20;
+        constexpr double kSearchMouseUnlockDip = 4.0;
 
-        const RectD kConvertBadgeDip{ 216.0, 610.0, 118.0, 42.0 };
-        const RectD kActionsBadgeDip{ 346.0, 610.0, 118.0, 42.0 };
+        const RectD kConvertBadgeDip{ 256.0, 684.0, 118.0, 42.0 };
+        const RectD kActionsBadgeDip{ 386.0, 684.0, 118.0, 42.0 };
 
         D2D1_COLOR_F Argb(BYTE a, BYTE r, BYTE g, BYTE b) noexcept
         {
             return D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
-        }
-
-        void ParseHexColor(const std::wstring& hex, BYTE& r, BYTE& g, BYTE& b) noexcept
-        {
-            r = 49; g = 134; b = 255;
-            if (hex.empty())
-                return;
-            const wchar_t* p = (hex[0] == L'#') ? hex.c_str() + 1 : hex.c_str();
-            unsigned int val = 0;
-            if (wcslen(p) == 6 && swscanf_s(p, L"%06x", &val) == 1)
-            {
-                r = static_cast<BYTE>((val >> 16) & 0xFF);
-                g = static_cast<BYTE>((val >> 8) & 0xFF);
-                b = static_cast<BYTE>(val & 0xFF);
-            }
-            else if (wcslen(p) == 8 && swscanf_s(p, L"%08x", &val) == 1)
-            {
-                r = static_cast<BYTE>((val >> 16) & 0xFF);
-                g = static_cast<BYTE>((val >> 8) & 0xFF);
-                b = static_cast<BYTE>(val & 0xFF);
-            }
         }
 
         bool IsClientAreaAnimationEnabled() noexcept
@@ -53,17 +38,6 @@ namespace winrings
             SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0);
             return enabled != FALSE;
         }
-
-        bool ContainsInsensitive(const std::wstring& haystack, const std::wstring& needle)
-        {
-            if (needle.empty())
-                return true;
-            if (haystack.size() < needle.size())
-                return false;
-            auto it = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(),
-                [](wchar_t a, wchar_t b) { return towlower(a) == towlower(b); });
-            return it != haystack.end();
-        }
     } // namespace
 
     RingOverlay::~RingOverlay()
@@ -71,11 +45,13 @@ namespace winrings
         Shutdown();
     }
 
-    bool RingOverlay::Initialize(HINSTANCE instance, HMODULE shellModule, WindowTracker* tracker, Callbacks callbacks)
+    bool RingOverlay::Initialize(HINSTANCE instance, HMODULE shellModule, WindowTracker* tracker,
+        Callbacks callbacks, AppIndex* appIndex)
     {
         m_instance = instance;
         m_shellModule = shellModule;
         m_tracker = tracker;
+        m_appIndex = appIndex;
         m_callbacks = std::move(callbacks);
 
         LARGE_INTEGER freq{};
@@ -100,7 +76,7 @@ namespace winrings
             WINRINGS_OVERLAY_CLASS_W,
             L"WinRings Overlay",
             WS_POPUP,
-            0, 0, 680, 680,
+            0, 0, 760, 760,
             nullptr, nullptr, m_instance, this);
         if (!m_hwnd)
             return false;
@@ -186,8 +162,8 @@ namespace winrings
             return false;
 
         m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Text", nullptr,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            12.0f, L"en-us", m_titleFormat.ReleaseAndGetAddressOf());
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            13.0f, L"en-us", m_titleFormat.ReleaseAndGetAddressOf());
         if (m_titleFormat)
         {
             m_titleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -200,8 +176,8 @@ namespace winrings
         }
 
         m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Text", nullptr,
-            DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            10.0f, L"en-us", m_smallFormat.ReleaseAndGetAddressOf());
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            11.0f, L"en-us", m_smallFormat.ReleaseAndGetAddressOf());
         if (m_smallFormat)
         {
             m_smallFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -213,6 +189,20 @@ namespace winrings
             m_smallFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
 
+        m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Text", nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            13.0f, L"en-us", m_searchFormat.ReleaseAndGetAddressOf());
+        if (m_searchFormat)
+        {
+            m_searchFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            m_searchFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+            Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsis;
+            m_dwriteFactory->CreateEllipsisTrimmingSign(m_searchFormat.Get(), ellipsis.GetAddressOf());
+            m_searchFormat->SetTrimming(&trim, ellipsis.Get());
+            m_searchFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+
         m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Display", nullptr,
             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
             16.0f, L"en-us", m_glyphFormat.ReleaseAndGetAddressOf());
@@ -222,25 +212,51 @@ namespace winrings
             m_glyphFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
 
-        if (FAILED(DCompositionCreateDevice(m_dxgiDevice.Get(), IID_PPV_ARGS(m_dcompDevice.ReleaseAndGetAddressOf()))))
-            return false;
-        if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, m_dcompTarget.ReleaseAndGetAddressOf())))
-            return false;
-        if (FAILED(m_dcompDevice->CreateVisual(m_dcompVisual.ReleaseAndGetAddressOf())))
+        if (!EnsureSwapChainSize(760, 760))
             return false;
 
-        return EnsureSwapChainSize(680, 680);
+        EnsureNoiseBrush();
+
+        if (!m_acrylicBackdrop.Initialize(m_hwnd, m_swapChain.Get(), m_maskSwapChain.Get(),
+            m_swapWidthPx, m_swapHeightPx))
+        {
+            // Fallback to IDCompositionTarget if Windows.UI.Composition desktop target is unavailable.
+            if (FAILED(DCompositionCreateDevice(m_dxgiDevice.Get(), IID_PPV_ARGS(m_dcompDevice.ReleaseAndGetAddressOf()))))
+                return false;
+            if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, m_dcompTarget.ReleaseAndGetAddressOf())))
+                return false;
+            if (FAILED(m_dcompDevice->CreateVisual(m_dcompVisual.ReleaseAndGetAddressOf())))
+                return false;
+            if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())))
+                return false;
+            if (FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
+                return false;
+        }
+        else
+        {
+            m_acrylicBackdrop.UpdateMaterial(BuildAcrylicMaterial());
+        }
+
+        return true;
     }
 
     void RingOverlay::ReleaseGraphicsDevices()
     {
         m_d2dBitmapCache.clear();
+        m_noiseBrush.Reset();
+        m_noiseBitmap.Reset();
+        if (m_d2dContext)
+            m_d2dContext->SetTarget(nullptr);
+        m_acrylicBackdrop.Shutdown();
+        m_maskTargetBitmap.Reset();
+        m_maskSwapChain.Reset();
         m_targetBitmap.Reset();
         m_swapChain.Reset();
         m_dcompVisual.Reset();
         m_dcompTarget.Reset();
         m_dcompDevice.Reset();
         m_glyphFormat.Reset();
+        m_searchFormat.Reset();
         m_smallFormat.Reset();
         m_titleFormat.Reset();
         m_dwriteFactory.Reset();
@@ -255,19 +271,24 @@ namespace winrings
 
     bool RingOverlay::EnsureSwapChainSize(int widthPx, int heightPx)
     {
-        if (!m_dxgiDevice || !m_d2dContext || !m_dcompDevice || !m_dcompVisual || !m_dcompTarget)
+        if (!m_dxgiDevice || !m_d2dContext)
             return false;
 
         widthPx = (std::max)(1, widthPx);
         heightPx = (std::max)(1, heightPx);
-        if (m_swapChain && m_swapWidthPx == widthPx && m_swapHeightPx == heightPx && m_targetBitmap)
+        if (m_swapChain && m_maskSwapChain && m_swapWidthPx == widthPx && m_swapHeightPx == heightPx &&
+            m_targetBitmap && m_maskTargetBitmap)
             return true;
 
         m_d2dContext->SetTarget(nullptr);
         m_targetBitmap.Reset();
+        m_maskTargetBitmap.Reset();
 
-        if (!m_swapChain)
+        if (!m_swapChain || !m_maskSwapChain)
         {
+            m_swapChain.Reset();
+            m_maskSwapChain.Reset();
+
             Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
             if (FAILED(m_dxgiDevice->GetAdapter(adapter.GetAddressOf())))
                 return false;
@@ -289,22 +310,27 @@ namespace winrings
             if (FAILED(factory->CreateSwapChainForComposition(m_dxgiDevice.Get(), &desc, nullptr,
                 m_swapChain.ReleaseAndGetAddressOf())))
                 return false;
+            if (FAILED(factory->CreateSwapChainForComposition(m_dxgiDevice.Get(), &desc, nullptr,
+                m_maskSwapChain.ReleaseAndGetAddressOf())))
+                return false;
 
-            if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())))
-                return false;
-            if (FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
-                return false;
+            if (m_dcompVisual && m_dcompTarget)
+            {
+                if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())))
+                    return false;
+                if (FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
+                    return false;
+            }
         }
         else
         {
             if (FAILED(m_swapChain->ResizeBuffers(2, static_cast<UINT>(widthPx), static_cast<UINT>(heightPx),
                 DXGI_FORMAT_B8G8R8A8_UNORM, 0)))
                 return false;
+            if (FAILED(m_maskSwapChain->ResizeBuffers(2, static_cast<UINT>(widthPx), static_cast<UINT>(heightPx),
+                DXGI_FORMAT_B8G8R8A8_UNORM, 0)))
+                return false;
         }
-
-        Microsoft::WRL::ComPtr<IDXGISurface> surface;
-        if (FAILED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(surface.GetAddressOf()))))
-            return false;
 
         D2D1_BITMAP_PROPERTIES1 bp{};
         bp.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
@@ -312,12 +338,22 @@ namespace winrings
         bp.dpiX = 96.0f;
         bp.dpiY = 96.0f;
 
-        if (FAILED(m_d2dContext->CreateBitmapFromDxgiSurface(surface.Get(), &bp,
-            m_targetBitmap.ReleaseAndGetAddressOf())))
+        Microsoft::WRL::ComPtr<IDXGISurface> fgSurface;
+        if (FAILED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(fgSurface.GetAddressOf()))) ||
+            FAILED(m_d2dContext->CreateBitmapFromDxgiSurface(fgSurface.Get(), &bp,
+                m_targetBitmap.ReleaseAndGetAddressOf())))
+            return false;
+
+        Microsoft::WRL::ComPtr<IDXGISurface> maskSurface;
+        if (FAILED(m_maskSwapChain->GetBuffer(0, IID_PPV_ARGS(maskSurface.GetAddressOf()))) ||
+            FAILED(m_d2dContext->CreateBitmapFromDxgiSurface(maskSurface.Get(), &bp,
+                m_maskTargetBitmap.ReleaseAndGetAddressOf())))
             return false;
 
         m_swapWidthPx = widthPx;
         m_swapHeightPx = heightPx;
+        if (m_acrylicBackdrop.IsActive())
+            m_acrylicBackdrop.Resize(widthPx, heightPx);
         return true;
     }
 
@@ -336,6 +372,12 @@ namespace winrings
             m_d2dBitmapCache.clear();
         m_d2dBitmapCache.emplace(wicSource, bmp);
         return bmp;
+    }
+
+    RingGeometry RingOverlay::ActiveGeometry() const noexcept
+    {
+        const int slotCount = (std::max)(1, static_cast<int>(m_visibleSlots.size()));
+        return ComputeRingGeometry(slotCount, m_config.ringRadiusDip, m_config.iconSizeDip, m_config.deadzoneDip);
     }
 
     void RingOverlay::UpdateDpiAndPosition(int physicalX, int physicalY)
@@ -364,9 +406,12 @@ namespace winrings
             };
         }
 
+        const RingGeometry geom = ActiveGeometry();
+        const double padDip = (std::min)(geom.outerRadius + 78.0,
+            (std::min)(workAreaDip.width, workAreaDip.height) * 0.48);
         const double cursorDipX = physicalX / m_dpiScale;
         const double cursorDipY = physicalY / m_dpiScale;
-        const PointD clampedDip = ClampRingCenter(cursorDipX, cursorDipY, m_config.ringRadiusDip + 50.0, workAreaDip);
+        const PointD clampedDip = ClampRingCenter(cursorDipX, cursorDipY, padDip, workAreaDip);
 
         const int physSize = static_cast<int>(std::llround(kOverlayDip * m_dpiScale));
         const int leftPx = static_cast<int>(std::llround((clampedDip.x - kCenterDip) * m_dpiScale));
@@ -382,10 +427,11 @@ namespace winrings
     {
         if (!m_isOpen || !m_hwnd)
             return false;
+        const RingGeometry geom = ActiveGeometry();
         const double dx = (screenPt.x - m_centerScreenPhysical.x) / m_dpiScale;
         const double dy = (screenPt.y - m_centerScreenPhysical.y) / m_dpiScale;
         const double dist = std::hypot(dx, dy);
-        if (dist <= MainRingOuterRadius(m_config.ringRadiusDip, m_config.iconSizeDip) + 10.0)
+        if (dist <= geom.outerRadius + 16.0)
             return true;
         if (!m_submenuCardRects.empty())
         {
@@ -393,8 +439,8 @@ namespace winrings
             for (const auto& cardRect : m_submenuCardRects)
             {
                 const RectD expanded{
-                    cardRect.left - 12.0, cardRect.top - 12.0,
-                    cardRect.width + 24.0, cardRect.height + 24.0
+                    cardRect.left - 18.0, cardRect.top - 18.0,
+                    cardRect.width + 36.0, cardRect.height + 36.0
                 };
                 if (expanded.Contains(local))
                     return true;
@@ -403,101 +449,33 @@ namespace winrings
         return false;
     }
 
+    void RingOverlay::EnsureNoiseBrush()
+    {
+        if (m_noiseBrush || !m_d2dContext)
+            return;
+
+        const std::vector<uint8_t> noise = GenerateAcrylicNoiseBgra256();
+        D2D1_BITMAP_PROPERTIES1 bp{};
+        bp.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+        bp.dpiX = 96.0f;
+        bp.dpiY = 96.0f;
+        if (FAILED(m_d2dContext->CreateBitmap(
+            D2D1::SizeU(256, 256), noise.data(), 256u * 4u, &bp, m_noiseBitmap.ReleaseAndGetAddressOf())) || !m_noiseBitmap)
+            return;
+
+        D2D1_BITMAP_BRUSH_PROPERTIES bbp = D2D1::BitmapBrushProperties(
+            D2D1_EXTEND_MODE_WRAP, D2D1_EXTEND_MODE_WRAP, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        m_d2dContext->CreateBitmapBrush(m_noiseBitmap.Get(), bbp, m_noiseBrush.ReleaseAndGetAddressOf());
+    }
+
+    AcrylicMaterialParams RingOverlay::BuildAcrylicMaterial() const noexcept
+    {
+        return AcrylicParamsFromMaterial(ComputeRingMaterial(m_config, m_dpiScale));
+    }
+
     RingOverlay::ThemeColors RingOverlay::BuildThemeColors() const noexcept
     {
-        BYTE ar = 49, ag = 134, ab = 255;
-        ParseHexColor(m_config.accentColor, ar, ag, ab);
-
-        ThemeColors c{};
-        c.accent = Argb(255, ar, ag, ab);
-        c.accentColorRef = RGB(ar, ag, ab);
-        c.textColor = Argb(255, 245, 247, 250);
-
-        switch (m_config.theme)
-        {
-        case RingTheme::LiquidGlass:
-            c.ringFill = Argb(188, 22, 26, 36);
-            c.ringStroke = Argb(120, ar, ag, ab);
-            c.ringStrokeWidth = 1.5f;
-            c.innerFill = Argb(28, 255, 255, 255);
-            c.slotIdleFill = Argb(45, 255, 255, 255);
-            c.slotSelectedFill = Argb(175, ar, ag, ab);
-            c.sectorFill = Argb(76, ar, ag, ab);
-            c.sectorStroke = Argb(220, ar, ag, ab);
-            c.centerFill = Argb(218, 20, 23, 30);
-            c.centerBorder = Argb(95, 255, 255, 255);
-            c.borderColorRef = RGB(82, 90, 108);
-            break;
-        case RingTheme::Glass:
-            c.ringFill = Argb(218, 30, 34, 42);
-            c.ringStroke = Argb(85, 255, 255, 255);
-            c.ringStrokeWidth = 1.2f;
-            c.innerFill = Argb(48, 0, 0, 0);
-            c.slotIdleFill = Argb(36, 255, 255, 255);
-            c.slotSelectedFill = Argb(150, ar, ag, ab);
-            c.sectorFill = Argb(62, ar, ag, ab);
-            c.sectorStroke = Argb(190, ar, ag, ab);
-            c.centerFill = Argb(228, 26, 29, 36);
-            c.centerBorder = Argb(75, 255, 255, 255);
-            c.borderColorRef = RGB(74, 80, 94);
-            break;
-        case RingTheme::Kiwi:
-            c.ringFill = Argb(245, 245, 247, 250);
-            c.ringStroke = Argb(255, 210, 216, 224);
-            c.ringStrokeWidth = 1.5f;
-            c.innerFill = Argb(232, 235, 239, 245);
-            c.slotIdleFill = Argb(255, 255, 255, 255);
-            c.slotSelectedFill = Argb(225, ar, ag, ab);
-            c.sectorFill = Argb(58, ar, ag, ab);
-            c.sectorStroke = Argb(225, ar, ag, ab);
-            c.centerFill = Argb(250, 255, 255, 255);
-            c.centerBorder = Argb(255, 200, 206, 214);
-            c.textColor = Argb(255, 24, 27, 34);
-            c.borderColorRef = RGB(200, 206, 214);
-            break;
-        case RingTheme::Aura:
-            c.useAuraGradient = true;
-            c.ringFill = Argb(220, ar, ag, ab);
-            c.auraOuter = Argb(215, 14, 17, 24);
-            c.ringStroke = Argb(155, ar, ag, ab);
-            c.ringStrokeWidth = 1.8f;
-            c.innerFill = Argb(128, 14, 17, 24);
-            c.slotIdleFill = Argb(58, 255, 255, 255);
-            c.slotSelectedFill = Argb(220, ar, ag, ab);
-            c.sectorFill = Argb(96, ar, ag, ab);
-            c.sectorStroke = Argb(245, 255, 255, 255);
-            c.centerFill = Argb(232, 14, 17, 24);
-            c.centerBorder = Argb(170, ar, ag, ab);
-            c.borderColorRef = RGB(ar, ag, ab);
-            break;
-        case RingTheme::Orbit:
-            c.ringFill = Argb(150, 16, 18, 24);
-            c.ringStroke = Argb(175, ar, ag, ab);
-            c.ringStrokeWidth = 2.0f;
-            c.innerFill = Argb(0, 0, 0, 0);
-            c.slotIdleFill = Argb(195, 26, 30, 38);
-            c.slotSelectedFill = Argb(238, ar, ag, ab);
-            c.sectorFill = Argb(48, ar, ag, ab);
-            c.sectorStroke = Argb(228, ar, ag, ab);
-            c.centerFill = Argb(215, 20, 23, 30);
-            c.centerBorder = Argb(175, ar, ag, ab);
-            c.borderColorRef = RGB(ar, ag, ab);
-            break;
-        case RingTheme::Outline:
-            c.ringFill = Argb(236, 10, 12, 16);
-            c.ringStroke = Argb(255, 255, 255, 255);
-            c.ringStrokeWidth = 2.2f;
-            c.innerFill = Argb(0, 0, 0, 0);
-            c.slotIdleFill = Argb(255, 20, 22, 28);
-            c.slotSelectedFill = Argb(255, ar, ag, ab);
-            c.sectorFill = Argb(68, ar, ag, ab);
-            c.sectorStroke = Argb(255, 255, 255, 255);
-            c.centerFill = Argb(255, 10, 12, 16);
-            c.centerBorder = Argb(255, 255, 255, 255);
-            c.borderColorRef = RGB(255, 255, 255);
-            break;
-        }
-        return c;
+        return ComputeRingMaterial(m_config, m_dpiScale);
     }
 
     void RingOverlay::OpenAt(int physicalX, int physicalY, std::vector<RingSlot> slots, bool lockOpen)
@@ -505,15 +483,24 @@ namespace winrings
         if (!m_hwnd)
             return;
 
+        if (m_appIndex)
+            m_appIndex->EnsureFreshAsync();
+
         m_allSlots = std::move(slots);
         m_visibleSlots = m_allSlots;
-        m_slotScales.assign(m_visibleSlots.size(), 1.0);
+        m_slotSearchMatched.assign(m_visibleSlots.size(), true);
+        m_slotScales.assign(m_visibleSlots.size(), kIdleSlotScale);
+        m_searchResultSlots.clear();
+        m_rankedMatches.clear();
+        m_rankedMatchCursor = -1;
         m_filterQuery.clear();
         m_selectedIndex = -1;
         ClearSubmenu();
         m_corridorOriginDip = { kCenterDip, kCenterDip };
         m_hasLastPointer = false;
         m_lastPointerPhysical = {};
+        m_searchMouseLocked = false;
+        m_searchMouseAnchorDip = {};
         m_isLockedOpen = lockOpen;
         m_contextMenuOpen = false;
         m_dragActive = false;
@@ -522,8 +509,8 @@ namespace winrings
 
         UpdateDpiAndPosition(physicalX, physicalY);
 
-        const bool staticMode = m_config.disableOpeningAnimation || !IsClientAreaAnimationEnabled();
-        if (staticMode)
+        const bool staticOpen = m_config.disableOpeningAnimation || !IsClientAreaAnimationEnabled();
+        if (staticOpen)
         {
             m_openProgress = 1.0;
         }
@@ -544,6 +531,19 @@ namespace winrings
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     }
 
+    void RingOverlay::HandleEscapeKey()
+    {
+        if (!m_isOpen)
+            return;
+        if (!m_filterQuery.empty())
+        {
+            m_filterQuery.clear();
+            RebuildLayoutAfterFilter();
+            return;
+        }
+        Dismiss();
+    }
+
     void RingOverlay::Dismiss()
     {
         if (!m_isOpen && !m_animTimerRunning)
@@ -554,6 +554,9 @@ namespace winrings
         m_dragActive = false;
         m_selectedIndex = -1;
         m_filterQuery.clear();
+        m_rankedMatches.clear();
+        m_rankedMatchCursor = -1;
+        m_searchMouseLocked = false;
 
         if (m_animTimerRunning && m_hwnd)
         {
@@ -578,8 +581,12 @@ namespace winrings
         m_thumbPool.HideAll();
         m_submenuCards.clear();
         m_submenuCardRects.clear();
+        m_searchResultSlots.clear();
         m_expandedSlotIndex = -1;
         m_selectedSubIndex = -1;
+        m_searchArcActive = false;
+        m_submenuHasArcTrack = false;
+        m_submenuArcLayout = {};
         m_submenuBoundsDip = {};
         m_submenuIsTitleColumn = false;
     }
@@ -594,32 +601,33 @@ namespace winrings
         if (!SlotHasSubmenuItems(slot))
             return;
 
+        const RingGeometry geom = ActiveGeometry();
         m_expandedSlotIndex = slotIndex;
         const int slotCount = static_cast<int>(m_visibleSlots.size());
         const double originDist = std::hypot(originDip.x - kCenterDip, originDip.y - kCenterDip);
-        const double mainRingOuterR = MainRingOuterRadius(m_config.ringRadiusDip, m_config.iconSizeDip);
-        m_corridorOriginDip = (originDist <= mainRingOuterR)
+        m_corridorOriginDip = (originDist <= geom.outerRadius)
             ? originDip
-            : GetSlotCenter(kCenterDip, kCenterDip, m_config.ringRadiusDip, slotIndex, slotCount);
+            : GetSlotCenter(kCenterDip, kCenterDip, geom.ringRadius, slotIndex, slotCount);
         const double baseAngle = GetSlotAngle(slotIndex, slotCount);
         const size_t minWin = m_config.fanOutSingleWindow ? 1 : 2;
 
         if (slot.windows.size() >= minWin)
         {
             const int count = (std::min)(static_cast<int>(slot.windows.size()), 9);
+            m_submenuHasArcTrack = false;
             if (m_config.windowViewMode == WindowViewMode::TitleColumn)
             {
                 m_submenuIsTitleColumn = true;
                 m_submenuCardRects = ComputeTitleColumnRects(
                     kCenterDip, kCenterDip, kOverlayDip, baseAngle,
-                    m_config.ringRadiusDip, m_config.iconSizeDip, count);
+                    geom.ringRadius, geom.iconSize, count);
             }
             else
             {
                 m_submenuIsTitleColumn = false;
                 m_submenuCardRects = ComputeWindowOuterArcRects(
                     kCenterDip, kCenterDip, baseAngle,
-                    m_config.ringRadiusDip, m_config.iconSizeDip, m_config.thumbnailScale, count);
+                    geom.ringRadius, geom.iconSize, m_config.thumbnailScale, count);
             }
 
             m_submenuCards.reserve(m_submenuCardRects.size());
@@ -633,10 +641,13 @@ namespace winrings
         else if (!slot.subItems.empty())
         {
             const int count = (std::min)(static_cast<int>(slot.subItems.size()), 9);
+            const bool isFolderArc = (slot.kind == SlotKind::Folder);
             m_submenuIsTitleColumn = false;
-            m_submenuCardRects = ComputeFolderSubmenuRects(
-                kCenterDip, kCenterDip, baseAngle,
-                m_config.ringRadiusDip, m_config.iconSizeDip, count);
+            m_submenuHasArcTrack = true;
+            m_submenuArcLayout = ComputeIconArcLayout(
+                kCenterDip, kCenterDip, baseAngle, geom.outerRadius,
+                count, 40.0, 12.0, 4.01426, isFolderArc);
+            m_submenuCardRects = m_submenuArcLayout.rects;
 
             m_submenuCards.reserve(m_submenuCardRects.size());
             for (size_t i = 0; i < m_submenuCardRects.size(); ++i)
@@ -716,23 +727,33 @@ namespace winrings
         const PointD centerPt{ kCenterDip, kCenterDip };
         const int slotCount = static_cast<int>(m_visibleSlots.size());
 
+        if (m_searchMouseLocked)
+        {
+            if (std::hypot(localPt.x - m_searchMouseAnchorDip.x, localPt.y - m_searchMouseAnchorDip.y) <= kSearchMouseUnlockDip)
+                return;
+            m_searchMouseLocked = false;
+        }
+
+        const RingGeometry geom = ActiveGeometry();
+        const double outerReach = m_isLockedOpen ? 12.0 : 48.0;
         const RingHoverResult next = ResolveRingHover(
             localPt,
             centerPt,
             slotCount,
             m_config.deadzoneDip,
-            m_config.ringRadiusDip,
-            m_config.iconSizeDip,
+            geom.ringRadius,
+            geom.iconSize,
             m_selectedIndex,
             m_expandedSlotIndex,
             m_corridorOriginDip,
             m_submenuCardRects,
             m_submenuBoundsDip,
-            m_submenuIsTitleColumn);
+            m_submenuIsTitleColumn,
+            outerReach);
 
-        const bool staticAnim = m_config.disableOpeningAnimation || !IsClientAreaAnimationEnabled();
+        const bool allowHoverAnim = IsClientAreaAnimationEnabled();
         auto ensureAnimRunning = [&]() {
-            if (!staticAnim && !m_animTimerRunning && m_hwnd)
+            if (allowHoverAnim && !m_animTimerRunning && m_hwnd)
             {
                 SetTimer(m_hwnd, kAnimTimerId, kAnimIntervalMs, nullptr);
                 m_animTimerRunning = true;
@@ -741,6 +762,48 @@ namespace winrings
 
         bool needsRender = false;
         bool needsThumbSync = false;
+
+        if (m_searchArcActive || !m_filterQuery.empty())
+        {
+            int nextRingIdx = -1;
+            int nextSubIdx = -1;
+            if (next.selectedSlot == -2 && next.selectedSubIndex >= 0)
+            {
+                nextSubIdx = next.selectedSubIndex;
+            }
+            else if (next.selectedSlot >= 0 &&
+                     next.selectedSlot < static_cast<int>(m_slotSearchMatched.size()) &&
+                     m_slotSearchMatched[static_cast<size_t>(next.selectedSlot)])
+            {
+                nextRingIdx = next.selectedSlot;
+            }
+
+            if (nextRingIdx != m_selectedIndex || nextSubIdx != m_selectedSubIndex)
+            {
+                m_selectedIndex = nextRingIdx;
+                m_selectedSubIndex = nextSubIdx;
+                for (size_t i = 0; i < m_submenuCards.size(); ++i)
+                    m_submenuCards[i].targetScale = (static_cast<int>(i) == m_selectedSubIndex) ? 1.12 : 1.0;
+
+                if (!allowHoverAnim)
+                {
+                    for (size_t i = 0; i < m_slotScales.size(); ++i)
+                        m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
+                    for (auto& card : m_submenuCards)
+                        card.currentScale = card.targetScale;
+                }
+                else
+                {
+                    ensureAnimRunning();
+                }
+                needsRender = true;
+            }
+            if (next.updateCorridorOrigin)
+                m_corridorOriginDip = localPt;
+            if (needsRender)
+                Render();
+            return;
+        }
 
         if (next.selectedSlot != m_selectedIndex)
         {
@@ -752,10 +815,10 @@ namespace winrings
             else
                 ClearSubmenu();
 
-            if (staticAnim)
+            if (!allowHoverAnim)
             {
                 for (size_t i = 0; i < m_slotScales.size(); ++i)
-                    m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? 1.24 : 1.0;
+                    m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
             }
             else
             {
@@ -793,7 +856,7 @@ namespace winrings
                 m_selectedSubIndex = next.selectedSubIndex;
                 for (size_t i = 0; i < m_submenuCards.size(); ++i)
                     m_submenuCards[i].targetScale = (static_cast<int>(i) == m_selectedSubIndex) ? 1.12 : 1.0;
-                if (staticAnim)
+                if (!allowHoverAnim)
                 {
                     for (auto& card : m_submenuCards)
                         card.currentScale = card.targetScale;
@@ -819,6 +882,34 @@ namespace winrings
             m_config.scrollWheelMode == ScrollWheelBehavior::Disabled)
             return;
 
+        // When search is active, cycle through the ranked search matches (pinned/open ring items + top half-ring system apps)
+        if (!m_filterQuery.empty())
+        {
+            if (m_rankedMatches.empty())
+                return;
+            const int cnt = static_cast<int>(m_rankedMatches.size());
+            m_rankedMatchCursor = StepIndex(m_rankedMatchCursor, cnt, wheelDelta);
+            const RankedMatch& m = m_rankedMatches[static_cast<size_t>(m_rankedMatchCursor)];
+            if (m.isRingSlot)
+            {
+                m_selectedIndex = m.index;
+                m_selectedSubIndex = -1;
+            }
+            else
+            {
+                m_selectedIndex = -1;
+                m_selectedSubIndex = m.index;
+            }
+            for (size_t i = 0; i < m_slotScales.size(); ++i)
+                m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
+            for (size_t i = 0; i < m_submenuCards.size(); ++i)
+                m_submenuCards[i].currentScale = m_submenuCards[i].targetScale =
+                    (static_cast<int>(i) == m_selectedSubIndex) ? 1.12 : 1.0;
+            Render();
+            return;
+        }
+
+        const RingGeometry geom = ActiveGeometry();
         const int slotCount = static_cast<int>(m_visibleSlots.size());
 
         if (m_expandedSlotIndex >= 0 && !m_submenuCards.empty())
@@ -837,7 +928,7 @@ namespace winrings
             if (m_selectedIndex >= 0 && m_selectedIndex < slotCount &&
                 SlotHasSubmenuItems(m_visibleSlots[static_cast<size_t>(m_selectedIndex)]))
             {
-                const PointD slotOrigin = GetSlotCenter(kCenterDip, kCenterDip, m_config.ringRadiusDip, m_selectedIndex, slotCount);
+                const PointD slotOrigin = GetSlotCenter(kCenterDip, kCenterDip, geom.ringRadius, m_selectedIndex, slotCount);
                 OpenSubmenuForSlot(m_selectedIndex, slotOrigin);
                 if (!m_submenuCards.empty())
                 {
@@ -853,11 +944,11 @@ namespace winrings
         m_selectedIndex = StepIndex(m_selectedIndex, slotCount, wheelDelta);
         m_selectedSubIndex = -1;
         for (size_t i = 0; i < m_slotScales.size(); ++i)
-            m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? 1.24 : 1.0;
+            m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
 
         if (m_selectedIndex >= 0 && SlotHasSubmenuItems(m_visibleSlots[static_cast<size_t>(m_selectedIndex)]))
         {
-            const PointD slotOrigin = GetSlotCenter(kCenterDip, kCenterDip, m_config.ringRadiusDip, m_selectedIndex, slotCount);
+            const PointD slotOrigin = GetSlotCenter(kCenterDip, kCenterDip, geom.ringRadius, m_selectedIndex, slotCount);
             OpenSubmenuForSlot(m_selectedIndex, slotOrigin);
         }
         else
@@ -876,7 +967,7 @@ namespace winrings
         bool hasSlot = false;
         bool hasWindow = false;
 
-        if (m_expandedSlotIndex >= 0 && m_selectedSubIndex >= 0 &&
+        if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && m_selectedSubIndex >= 0 &&
             m_selectedSubIndex < static_cast<int>(m_submenuCards.size()))
         {
             const auto& card = m_submenuCards[static_cast<size_t>(m_selectedSubIndex)];
@@ -885,7 +976,7 @@ namespace winrings
                 chosenSlotCopy = *card.subSlot;
                 hasSlot = true;
             }
-            else if (card.window)
+            else if (card.window && m_expandedSlotIndex >= 0)
             {
                 chosenSlotCopy = m_visibleSlots[static_cast<size_t>(m_expandedSlotIndex)];
                 chosenWindowCopy = *card.window;
@@ -931,6 +1022,8 @@ namespace winrings
     {
         if (!m_isOpen)
             return;
+        if (ch == L' ' && m_filterQuery.empty())
+            return;
         m_filterQuery.push_back(ch);
         RebuildLayoutAfterFilter();
     }
@@ -946,28 +1039,152 @@ namespace winrings
     void RingOverlay::RebuildLayoutAfterFilter()
     {
         ClearSubmenu();
-        m_visibleSlots.clear();
-        for (const auto& slot : m_allSlots)
+        m_visibleSlots = m_allSlots;
+        m_slotSearchMatched.assign(m_visibleSlots.size(), true);
+        m_rankedMatches.clear();
+        m_rankedMatchCursor = -1;
+
+        const std::wstring trimmed = TrimCopyW(m_filterQuery);
+        if (trimmed.empty())
         {
-            bool match = ContainsInsensitive(slot.label, m_filterQuery);
-            if (!match)
-            {
-                for (const auto& w : slot.windows)
-                {
-                    if (ContainsInsensitive(w.title, m_filterQuery))
-                    {
-                        match = true;
-                        break;
-                    }
-                }
-            }
-            if (match)
-                m_visibleSlots.push_back(slot);
+            m_searchMouseLocked = false;
+            m_selectedIndex = -1;
+            m_selectedSubIndex = -1;
+            for (size_t i = 0; i < m_slotScales.size(); ++i)
+                m_slotScales[i] = kIdleSlotScale;
+            Render();
+            return;
         }
-        m_slotScales.assign(m_visibleSlots.size(), 1.0);
-        m_selectedIndex = (m_visibleSlots.size() == 1) ? 0 : -1;
-        if (m_selectedIndex == 0)
-            m_slotScales[0] = 1.24;
+
+        std::unordered_set<std::wstring> excludeTargets;
+        std::unordered_set<std::wstring> excludeNames;
+        for (size_t i = 0; i < m_visibleSlots.size(); ++i)
+        {
+            const auto& slot = m_visibleSlots[i];
+            if (!slot.pathOrUrl.empty())
+                excludeTargets.insert(AppIndex::CanonicalPathKey(slot.pathOrUrl));
+            if (!slot.label.empty())
+                excludeNames.insert(ToLowerFold(slot.label));
+            for (const auto& alias : slot.searchAliases)
+                excludeNames.insert(ToLowerFold(alias));
+
+            const int tier = ScoreAliases(slot.searchAliases, trimmed);
+            const bool matched = (tier >= 0);
+            m_slotSearchMatched[i] = matched;
+            if (matched)
+            {
+                m_rankedMatches.push_back(RankedMatch{
+                    true, static_cast<int>(i), tier, slot.label.size()
+                });
+            }
+        }
+
+        if (m_appIndex)
+        {
+            IWICImagingFactory* wic = m_tracker ? m_tracker->WicFactory() : nullptr;
+            const auto foundApps = m_appIndex->Search(trimmed, excludeTargets, excludeNames, 9, wic);
+            m_searchResultSlots.reserve(foundApps.size());
+            for (size_t j = 0; j < foundApps.size(); ++j)
+            {
+                const auto& app = foundApps[j];
+                RingSlot s;
+                s.id = L"sys-" + std::to_wstring(j);
+                s.kind = SlotKind::App;
+                s.label = app.name;
+                s.pathOrUrl = app.launchTarget;
+                s.iconBitmap = app.iconBitmap;
+                s.isPinned = false;
+                m_searchResultSlots.push_back(std::move(s));
+
+                const int sysTier = ScoreAliases(app.aliases, trimmed);
+                m_rankedMatches.push_back(RankedMatch{
+                    false, static_cast<int>(j), (sysTier >= 0 ? sysTier : 3), app.name.size()
+                });
+            }
+        }
+
+        std::sort(m_rankedMatches.begin(), m_rankedMatches.end(), [&](const RankedMatch& a, const RankedMatch& b) {
+            if (a.tier != b.tier)
+                return a.tier < b.tier;
+            if (a.isRingSlot != b.isRingSlot)
+                return a.isRingSlot; // Pinned & running main-ring apps win ties over external system apps!
+            return a.nameLen < b.nameLen;
+        });
+
+        if (!m_searchResultSlots.empty())
+        {
+            const RingGeometry geom = ActiveGeometry();
+            const int sysCount = static_cast<int>(m_searchResultSlots.size());
+            m_searchArcActive = true;
+            m_expandedSlotIndex = -2;
+            m_submenuIsTitleColumn = false;
+            m_submenuHasArcTrack = true;
+            m_submenuArcLayout = ComputeIconArcLayout(
+                kCenterDip, kCenterDip, -kPi * 0.5, geom.outerRadius,
+                sysCount, 40.0, 12.0, 4.01426, false);
+            m_submenuCardRects = m_submenuArcLayout.rects;
+            m_submenuCards.reserve(m_submenuCardRects.size());
+            for (size_t j = 0; j < m_submenuCardRects.size(); ++j)
+            {
+                m_submenuCards.push_back(SubmenuCard{
+                    m_submenuCardRects[j], nullptr, &m_searchResultSlots[j], 1.0, 1.0
+                });
+            }
+            m_submenuBoundsDip = ComputeUnionBounds(m_submenuCardRects);
+        }
+
+        if (!m_rankedMatches.empty())
+        {
+            m_rankedMatchCursor = 0;
+            const RankedMatch& best = m_rankedMatches[0];
+            if (best.isRingSlot)
+            {
+                m_selectedIndex = best.index;
+                m_selectedSubIndex = -1;
+            }
+            else
+            {
+                m_selectedIndex = -1;
+                m_selectedSubIndex = best.index;
+                if (m_selectedSubIndex >= 0 && m_selectedSubIndex < static_cast<int>(m_submenuCards.size()))
+                    m_submenuCards[static_cast<size_t>(m_selectedSubIndex)].targetScale = 1.12;
+            }
+        }
+        else
+        {
+            m_selectedIndex = -1;
+            m_selectedSubIndex = -1;
+        }
+
+        m_searchMouseLocked = true;
+        if (m_hasLastPointer)
+        {
+            m_searchMouseAnchorDip = {
+                kCenterDip + (m_lastPointerPhysical.x - m_centerScreenPhysical.x) / m_dpiScale,
+                kCenterDip + (m_lastPointerPhysical.y - m_centerScreenPhysical.y) / m_dpiScale
+            };
+        }
+        else
+        {
+            m_searchMouseAnchorDip = { kCenterDip, kCenterDip };
+        }
+
+        if (IsClientAreaAnimationEnabled())
+        {
+            if (!m_animTimerRunning && m_hwnd)
+            {
+                SetTimer(m_hwnd, kAnimTimerId, kAnimIntervalMs, nullptr);
+                m_animTimerRunning = true;
+            }
+        }
+        else
+        {
+            for (size_t i = 0; i < m_slotScales.size(); ++i)
+                m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
+            for (auto& card : m_submenuCards)
+                card.currentScale = card.targetScale;
+        }
+
         Render();
     }
 
@@ -990,7 +1207,7 @@ namespace winrings
 
         for (size_t i = 0; i < m_slotScales.size(); ++i)
         {
-            const double target = (static_cast<int>(i) == m_selectedIndex) ? 1.24 : 1.0;
+            const double target = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
             const double diff = target - m_slotScales[i];
             if (std::abs(diff) > 0.005)
             {
@@ -1040,24 +1257,149 @@ namespace winrings
         }
         if (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_visibleSlots.size()))
             return m_visibleSlots[static_cast<size_t>(m_selectedIndex)].label;
-        if (m_visibleSlots.empty())
+        if (!m_filterQuery.empty() && m_rankedMatches.empty())
             return L"No matches";
-        return std::to_wstring(m_visibleSlots.size()) + L" items";
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1Geometry> RingOverlay::BuildAnnulusGeometry(float outerR, float holeR) const
+    {
+        if (!m_d2dFactory)
+            return nullptr;
+
+        const D2D1_POINT_2F centerPt = D2D1::Point2F(static_cast<float>(kCenterDip), static_cast<float>(kCenterDip));
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> annulus;
+        if (FAILED(m_d2dFactory->CreatePathGeometry(annulus.GetAddressOf())) || !annulus)
+            return nullptr;
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(annulus->Open(sink.GetAddressOf())) || !sink)
+            return nullptr;
+
+        sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+        sink->BeginFigure(D2D1::Point2F(centerPt.x + outerR, centerPt.y), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x - outerR, centerPt.y),
+            D2D1::SizeF(outerR, outerR), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x + outerR, centerPt.y),
+            D2D1::SizeF(outerR, outerR), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+
+        sink->BeginFigure(D2D1::Point2F(centerPt.x + holeR, centerPt.y), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x - holeR, centerPt.y),
+            D2D1::SizeF(holeR, holeR), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x + holeR, centerPt.y),
+            D2D1::SizeF(holeR, holeR), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+        return annulus;
+    }
+
+    Microsoft::WRL::ComPtr<ID2D1Geometry> RingOverlay::BuildCurvedArcGeometry(const IconArcLayout& arc) const
+    {
+        if (!m_d2dFactory || arc.rects.empty())
+            return nullptr;
+
+        if (arc.rects.size() == 1)
+        {
+            const float cx = static_cast<float>(arc.rects[0].left + arc.rects[0].width * 0.5);
+            const float cy = static_cast<float>(arc.rects[0].top + arc.rects[0].height * 0.5);
+            const float r = static_cast<float>(arc.trackWidthDip * 0.5);
+            Microsoft::WRL::ComPtr<ID2D1EllipseGeometry> eg;
+            if (SUCCEEDED(m_d2dFactory->CreateEllipseGeometry(
+                D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), eg.GetAddressOf())))
+                return eg;
+            return nullptr;
+        }
+
+        double span = arc.endAngleRad - arc.startAngleRad;
+        if (span <= 0.001)
+            return nullptr;
+        if (span >= kTwoPi - 0.05)
+            span = kTwoPi - 0.05;
+
+        const float centerXY = static_cast<float>(kCenterDip);
+        const float r = static_cast<float>(arc.arcRadius);
+        const D2D1_POINT_2F pStart{
+            centerXY + r * static_cast<float>(std::cos(arc.startAngleRad)),
+            centerXY + r * static_cast<float>(std::sin(arc.startAngleRad))
+        };
+        const D2D1_POINT_2F pEnd{
+            centerXY + r * static_cast<float>(std::cos(arc.startAngleRad + span)),
+            centerXY + r * static_cast<float>(std::sin(arc.startAngleRad + span))
+        };
+
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> arcGeo;
+        if (FAILED(m_d2dFactory->CreatePathGeometry(arcGeo.GetAddressOf())) || !arcGeo)
+            return nullptr;
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(arcGeo->Open(sink.GetAddressOf())) || !sink)
+            return nullptr;
+        sink->BeginFigure(pStart, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddArc(D2D1::ArcSegment(
+            pEnd,
+            D2D1::SizeF(r, r),
+            0.0f,
+            D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            (span > kPi) ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        sink->Close();
+
+        D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties(
+            D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+            D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f);
+        Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStyle;
+        m_d2dFactory->CreateStrokeStyle(ssp, nullptr, 0, roundStyle.GetAddressOf());
+
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> widenedGeo;
+        if (FAILED(m_d2dFactory->CreatePathGeometry(widenedGeo.GetAddressOf())) || !widenedGeo)
+            return nullptr;
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> widenedSink;
+        if (FAILED(widenedGeo->Open(widenedSink.GetAddressOf())) || !widenedSink)
+            return nullptr;
+        if (SUCCEEDED(arcGeo->Widen(static_cast<float>(arc.trackWidthDip), roundStyle.Get(),
+            nullptr, 0.25f, widenedSink.Get())))
+        {
+            widenedSink->Close();
+            return widenedGeo;
+        }
+        return nullptr;
+    }
+
+    void RingOverlay::DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill)
+    {
+        if (!m_d2dContext || !arcGeo || arc.rects.empty())
+            return;
+
+        auto mkBrush = [&](D2D1_COLOR_F col) {
+            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> b;
+            m_d2dContext->CreateSolidColorBrush(col, b.GetAddressOf());
+            return b;
+        };
+
+        if (paintFill)
+        {
+            if (auto b = mkBrush(tc.ringFill))
+                m_d2dContext->FillGeometry(arcGeo, b.Get());
+        }
+        if (m_noiseBrush && tc.noiseOpacity > 0.002f)
+            m_d2dContext->FillGeometry(arcGeo, m_noiseBrush.Get());
+        if (auto b = mkBrush(tc.ringStroke))
+            m_d2dContext->DrawGeometry(arcGeo, b.Get(), tc.hairlineWidth);
     }
 
     void RingOverlay::Render()
     {
-        if (!m_d2dContext || !m_targetBitmap || !m_swapChain || !m_dcompDevice)
+        if (!m_d2dContext || !m_targetBitmap || !m_swapChain)
             return;
 
+        const bool acrylicActive = m_acrylicBackdrop.IsActive() && m_maskSwapChain && m_maskTargetBitmap;
+        if (acrylicActive)
+            m_acrylicBackdrop.UpdateMaterial(BuildAcrylicMaterial());
+
         const ThemeColors tc = BuildThemeColors();
+        const RingGeometry geom = ActiveGeometry();
         const float dpiScale = static_cast<float>(m_dpiScale);
         const double easedOpen = EaseOutCubic(m_openProgress);
         const float openScale = static_cast<float>(0.86 + 0.14 * easedOpen);
-
-        m_d2dContext->SetTarget(m_targetBitmap.Get());
-        m_d2dContext->BeginDraw();
-        m_d2dContext->Clear(D2D1::ColorF(0, 0, 0, 0));
 
         D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Scale(dpiScale, dpiScale);
         if (openScale < 0.999f)
@@ -1065,6 +1407,133 @@ namespace winrings
             transform = D2D1::Matrix3x2F::Scale(openScale, openScale,
                 D2D1::Point2F(static_cast<float>(kCenterDip), static_cast<float>(kCenterDip))) * transform;
         }
+
+        const float outerR = static_cast<float>(geom.outerRadius);
+        const float holeR = static_cast<float>(geom.holeRadius);
+        const D2D1_POINT_2F centerPt = D2D1::Point2F(static_cast<float>(kCenterDip), static_cast<float>(kCenterDip));
+
+        Microsoft::WRL::ComPtr<ID2D1Geometry> annulusGeo = BuildAnnulusGeometry(outerR, holeR);
+        Microsoft::WRL::ComPtr<ID2D1Geometry> curvedArcGeo;
+        if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty() && m_submenuHasArcTrack)
+            curvedArcGeo = BuildCurvedArcGeometry(m_submenuArcLayout);
+
+        auto measureTextWidth = [&](const std::wstring& txt, IDWriteTextFormat* fmt, float maxW) -> float {
+            if (txt.empty() || !fmt || !m_dwriteFactory)
+                return 0.0f;
+            Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+            if (SUCCEEDED(m_dwriteFactory->CreateTextLayout(
+                txt.c_str(), static_cast<UINT32>(txt.size()), fmt, maxW, 32.0f, layout.GetAddressOf())) && layout)
+            {
+                DWRITE_TEXT_METRICS tm{};
+                if (SUCCEEDED(layout->GetMetrics(&tm)))
+                    return tm.widthIncludingTrailingWhitespace;
+            }
+            return static_cast<float>(txt.size()) * 7.5f;
+        };
+
+        const bool hasQuery = !m_filterQuery.empty();
+        D2D1_ROUNDED_RECT searchPill{};
+        if (hasQuery)
+        {
+            constexpr float kSearchH = 26.0f;
+            constexpr float kSearchR = 13.0f;
+            const float maxSearchW = (std::max)(110.0f, holeR * 1.78f);
+            const float queryW = measureTextWidth(m_filterQuery, m_searchFormat.Get(), maxSearchW - 44.0f);
+            const float searchW = (std::clamp)(queryW + 46.0f, 96.0f, maxSearchW);
+            const float searchBottom = (std::min)(centerPt.y - holeR * 0.42f, centerPt.y - 6.0f);
+            const float searchTop = searchBottom - kSearchH;
+            searchPill = D2D1::RoundedRect(
+                D2D1::RectF(centerPt.x - searchW * 0.5f, searchTop, centerPt.x + searchW * 0.5f, searchBottom),
+                kSearchR, kSearchR);
+        }
+
+        const std::wstring summary = BuildFilterSummary();
+        const bool hasSummary = !summary.empty();
+        D2D1_ROUNDED_RECT centerPill{};
+        if (hasSummary)
+        {
+            const float maxPillW = (std::max)(110.0f, holeR * 1.72f);
+            const float textW = measureTextWidth(summary, m_titleFormat.Get(), maxPillW - 26.0f);
+            const float cw = (std::clamp)(textW + 28.0f, 68.0f, maxPillW);
+            const float ch = 28.0f;
+            const float cy = centerPt.y + (hasQuery ? 15.0f : 0.0f);
+            centerPill = D2D1::RoundedRect(
+                D2D1::RectF(centerPt.x - cw * 0.5f, cy - ch * 0.5f, centerPt.x + cw * 0.5f, cy + ch * 0.5f),
+                14.0f, 14.0f);
+        }
+
+        // Pass A (when live acrylic is active): render antialiased alpha mask for glass regions only.
+        if (acrylicActive)
+        {
+            m_d2dContext->SetTarget(m_maskTargetBitmap.Get());
+            m_d2dContext->BeginDraw();
+            m_d2dContext->Clear(D2D1::ColorF(0, 0, 0, 0));
+            m_d2dContext->SetTransform(transform);
+
+            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> maskBrush;
+            m_d2dContext->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), maskBrush.GetAddressOf());
+            if (maskBrush)
+            {
+                if (annulusGeo)
+                    m_d2dContext->FillGeometry(annulusGeo.Get(), maskBrush.Get());
+                if (curvedArcGeo)
+                    m_d2dContext->FillGeometry(curvedArcGeo.Get(), maskBrush.Get());
+
+                if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty())
+                {
+                    for (const auto& card : m_submenuCards)
+                    {
+                        if (!card.window)
+                            continue;
+                        const float s = static_cast<float>(card.currentScale);
+                        const float cx = static_cast<float>(card.boundsDip.left + card.boundsDip.width * 0.5);
+                        const float cy = static_cast<float>(card.boundsDip.top + card.boundsDip.height * 0.5);
+                        const float hw = static_cast<float>(card.boundsDip.width * 0.5) * s;
+                        const float hh = static_cast<float>(card.boundsDip.height * 0.5) * s;
+                        m_d2dContext->FillRoundedRectangle(
+                            D2D1::RoundedRect(D2D1::RectF(cx - hw, cy - hh, cx + hw, cy + hh), 8.0f, 8.0f),
+                            maskBrush.Get());
+                    }
+                }
+
+                if (m_dragActive)
+                {
+                    auto fillDropMask = [&](const RectD& r) {
+                        m_d2dContext->FillRoundedRectangle(D2D1::RoundedRect(
+                            D2D1::RectF(static_cast<float>(r.left), static_cast<float>(r.top),
+                                static_cast<float>(r.Right()), static_cast<float>(r.Bottom())), 21.0f, 21.0f),
+                            maskBrush.Get());
+                    };
+                    fillDropMask(kConvertBadgeDip);
+                    fillDropMask(kActionsBadgeDip);
+                }
+
+                if (hasQuery)
+                    m_d2dContext->FillRoundedRectangle(searchPill, maskBrush.Get());
+                if (hasSummary)
+                    m_d2dContext->FillRoundedRectangle(centerPill, maskBrush.Get());
+            }
+
+            const HRESULT maskEndHr = m_d2dContext->EndDraw();
+            m_d2dContext->SetTarget(nullptr);
+            if (maskEndHr == D2DERR_RECREATE_TARGET)
+            {
+                ReleaseGraphicsDevices();
+                CreateGraphicsDevices();
+                return;
+            }
+            m_maskSwapChain->Present(0, 0);
+        }
+
+        // Pass B: Foreground content (frosted micro-grain, hairline rims, icons, running dots, hover reveal, magnifier, typography).
+        EnsureNoiseBrush();
+        const bool useNoise = (m_noiseBrush != nullptr && tc.noiseOpacity > 0.002f);
+        if (useNoise)
+            m_noiseBrush->SetOpacity(tc.noiseOpacity);
+
+        m_d2dContext->SetTarget(m_targetBitmap.Get());
+        m_d2dContext->BeginDraw();
+        m_d2dContext->Clear(D2D1::ColorF(0, 0, 0, 0));
         m_d2dContext->SetTransform(transform);
 
         auto mkBrush = [&](D2D1_COLOR_F col) {
@@ -1073,97 +1542,29 @@ namespace winrings
             return b;
         };
 
-        const float ringR = static_cast<float>(m_config.ringRadiusDip);
-        const float outerR = ringR + 38.0f;
-        const float innerR = (std::max)(static_cast<float>(m_config.deadzoneDip + 8.0), ringR - 36.0f);
-        const D2D1_POINT_2F centerPt = D2D1::Point2F(static_cast<float>(kCenterDip), static_cast<float>(kCenterDip));
-
-        // 1. Ring backdrop
-        if (tc.useAuraGradient)
+        // 1. Single Hollow Annulus Backdrop (in fallback mode) + frosted micro-grain texture + razor-thin A4S hairline rims
+        if (!acrylicActive && annulusGeo)
         {
-            D2D1_GRADIENT_STOP stops[2] = {
-                { 0.0f, tc.ringFill },
-                { 1.0f, tc.auraOuter }
-            };
-            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> sc;
-            if (SUCCEEDED(m_d2dContext->CreateGradientStopCollection(stops, 2, sc.GetAddressOf())))
-            {
-                Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> rgb;
-                D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES props = D2D1::RadialGradientBrushProperties(centerPt, D2D1::Point2F(0, 0), outerR, outerR);
-                if (SUCCEEDED(m_d2dContext->CreateRadialGradientBrush(props, sc.Get(), rgb.GetAddressOf())))
-                    m_d2dContext->FillEllipse(D2D1::Ellipse(centerPt, outerR, outerR), rgb.Get());
-            }
+            if (auto b = mkBrush(tc.ringFill))
+                m_d2dContext->FillGeometry(annulusGeo.Get(), b.Get());
         }
-        else if (auto b = mkBrush(tc.ringFill))
-        {
-            m_d2dContext->FillEllipse(D2D1::Ellipse(centerPt, outerR, outerR), b.Get());
-        }
+        if (useNoise && annulusGeo)
+            m_d2dContext->FillGeometry(annulusGeo.Get(), m_noiseBrush.Get());
         if (auto b = mkBrush(tc.ringStroke))
-            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR, outerR), b.Get(), tc.ringStrokeWidth);
-
-        if (tc.innerFill.a > 0.001f)
         {
-            if (auto b = mkBrush(tc.innerFill))
-                m_d2dContext->FillEllipse(D2D1::Ellipse(centerPt, innerR, innerR), b.Get());
+            const float halfSw = tc.ringStrokeWidth * 0.5f;
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - halfSw, outerR - halfSw), b.Get(), tc.ringStrokeWidth);
         }
-        if (auto b = mkBrush(tc.centerBorder))
-            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, innerR, innerR), b.Get(), 1.0f);
-
-        // 2. Active 18 DIP cone wedge
-        if (m_selectedIndex >= 0 && !m_visibleSlots.empty())
+        if (auto b = mkBrush(tc.innerRimStroke))
         {
-            const float coneInnerR = static_cast<float>(m_config.deadzoneDip + 6.0);
-            const size_t count = m_visibleSlots.size();
-            Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
-            if (SUCCEEDED(m_d2dFactory->CreatePathGeometry(path.GetAddressOf())) && path)
-            {
-                Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
-                if (SUCCEEDED(path->Open(sink.GetAddressOf())) && sink)
-                {
-                    if (count == 1)
-                    {
-                        sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
-                        sink->BeginFigure(D2D1::Point2F(centerPt.x + outerR, centerPt.y), D2D1_FIGURE_BEGIN_FILLED);
-                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x - outerR, centerPt.y), D2D1::SizeF(outerR, outerR), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x + outerR, centerPt.y), D2D1::SizeF(outerR, outerR), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-
-                        sink->BeginFigure(D2D1::Point2F(centerPt.x + coneInnerR, centerPt.y), D2D1_FIGURE_BEGIN_FILLED);
-                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x - coneInnerR, centerPt.y), D2D1::SizeF(coneInnerR, coneInnerR), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(centerPt.x + coneInnerR, centerPt.y), D2D1::SizeF(coneInnerR, coneInnerR), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-                    }
-                    else
-                    {
-                        const double sectorW = kTwoPi / static_cast<double>(count);
-                        const double centerA = -kPi * 0.5 + static_cast<double>(m_selectedIndex) * sectorW;
-                        const double startA = centerA - sectorW * 0.5;
-                        const double endA = centerA + sectorW * 0.5;
-                        const D2D1_ARC_SIZE arcSize = (sectorW > kPi) ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL;
-
-                        const D2D1_POINT_2F p1{ centerPt.x + outerR * static_cast<float>(std::cos(startA)), centerPt.y + outerR * static_cast<float>(std::sin(startA)) };
-                        const D2D1_POINT_2F p2{ centerPt.x + outerR * static_cast<float>(std::cos(endA)), centerPt.y + outerR * static_cast<float>(std::sin(endA)) };
-                        const D2D1_POINT_2F p3{ centerPt.x + coneInnerR * static_cast<float>(std::cos(endA)), centerPt.y + coneInnerR * static_cast<float>(std::sin(endA)) };
-                        const D2D1_POINT_2F p4{ centerPt.x + coneInnerR * static_cast<float>(std::cos(startA)), centerPt.y + coneInnerR * static_cast<float>(std::sin(startA)) };
-
-                        sink->BeginFigure(p1, D2D1_FIGURE_BEGIN_FILLED);
-                        sink->AddArc(D2D1::ArcSegment(p2, D2D1::SizeF(outerR, outerR), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, arcSize));
-                        sink->AddLine(p3);
-                        sink->AddArc(D2D1::ArcSegment(p4, D2D1::SizeF(coneInnerR, coneInnerR), 0.0f, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, arcSize));
-                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-                    }
-                    sink->Close();
-                }
-                if (auto b = mkBrush(tc.sectorFill))
-                    m_d2dContext->FillGeometry(path.Get(), b.Get());
-                if (auto b = mkBrush(tc.sectorStroke))
-                    m_d2dContext->DrawGeometry(path.Get(), b.Get(), 1.5f);
-            }
+            const float innerSw = tc.ringStrokeWidth * 0.82f;
+            const float halfSw = innerSw * 0.5f;
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + halfSw, holeR + halfSw), b.Get(), innerSw);
         }
 
-        // 3. Slot icons
+        // 2. Slot icons, running dots, selection circle & count badge (ZERO blue cone wedge!)
         const int slotCount = static_cast<int>(m_visibleSlots.size());
-        const double baseBadge = m_config.iconSizeDip + 14.0;
+        const bool searchFiltering = !m_filterQuery.empty();
         for (int pass = 0; pass < 2; ++pass)
         {
             for (int i = 0; i < slotCount; ++i)
@@ -1173,47 +1574,64 @@ namespace winrings
                     continue;
 
                 const RingSlot& slot = m_visibleSlots[static_cast<size_t>(i)];
-                const PointD pos = GetSlotCenter(kCenterDip, kCenterDip, m_config.ringRadiusDip, i, slotCount);
-                const float scale = static_cast<float>(i < static_cast<int>(m_slotScales.size()) ? m_slotScales[static_cast<size_t>(i)] : 1.0);
-                const float radius = static_cast<float>(baseBadge * 0.5) * scale;
+                const bool matchedInSearch = !searchFiltering ||
+                    (i < static_cast<int>(m_slotSearchMatched.size()) && m_slotSearchMatched[static_cast<size_t>(i)]);
+                const float dimAlpha = matchedInSearch ? 1.0f : 0.22f;
+
+                const double angle = GetSlotAngle(i, slotCount);
+                const PointD pos = GetSlotCenter(kCenterDip, kCenterDip, geom.ringRadius, i, slotCount);
+                const float scale = static_cast<float>(i < static_cast<int>(m_slotScales.size())
+                    ? m_slotScales[static_cast<size_t>(i)] : kIdleSlotScale);
+                const float haloR = static_cast<float>(geom.iconSize * 0.72) * (scale / static_cast<float>(kSelectedSlotScale));
                 const D2D1_POINT_2F sc{ static_cast<float>(pos.x), static_cast<float>(pos.y) };
 
+                // Running dot on inner rim (frontmost slightly larger at 1.0 alpha, others 0.6)
+                if (slot.IsRunning())
+                {
+                    const D2D1_POINT_2F dotPt{
+                        centerPt.x + static_cast<float>(geom.runningDotRadius * std::cos(angle)),
+                        centerPt.y + static_cast<float>(geom.runningDotRadius * std::sin(angle))
+                    };
+                    const float dotR = slot.isFrontmost ? 2.4f : 1.7f;
+                    D2D1_COLOR_F dotCol = tc.textColor;
+                    dotCol.a = (slot.isFrontmost ? 1.0f : 0.60f) * dimAlpha;
+                    if (auto b = mkBrush(dotCol))
+                        m_d2dContext->FillEllipse(D2D1::Ellipse(dotPt, dotR, dotR), b.Get());
+                }
+
+                // Selection circle + subtle A4S Fluent radial glow strictly on the hovered/selected icon
                 if (selected)
                 {
-                    D2D1_COLOR_F g0 = tc.accent; g0.a = 0.55f;
-                    D2D1_COLOR_F g1 = tc.accent; g1.a = 0.0f;
+                    D2D1_COLOR_F g0 = tc.hoverRevealColor; g0.a = (m_config.theme == RingTheme::A4S) ? 0.30f : 0.36f;
+                    D2D1_COLOR_F g1 = tc.hoverRevealColor; g1.a = 0.0f;
                     D2D1_GRADIENT_STOP stops[2] = { { 0.0f, g0 }, { 1.0f, g1 } };
                     Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> gsc;
                     if (SUCCEEDED(m_d2dContext->CreateGradientStopCollection(stops, 2, gsc.GetAddressOf())))
                     {
                         Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glow;
-                        const float gr = radius * 1.65f;
+                        const float gr = haloR * 1.48f;
                         if (SUCCEEDED(m_d2dContext->CreateRadialGradientBrush(
                             D2D1::RadialGradientBrushProperties(sc, D2D1::Point2F(0, 0), gr, gr), gsc.Get(), glow.GetAddressOf())))
                         {
                             m_d2dContext->FillEllipse(D2D1::Ellipse(sc, gr, gr), glow.Get());
                         }
                     }
+
+                    if (auto b = mkBrush(tc.slotSelectedFill))
+                        m_d2dContext->FillEllipse(D2D1::Ellipse(sc, haloR, haloR), b.Get());
+                    if (auto b = mkBrush(tc.hoverRim))
+                        m_d2dContext->DrawEllipse(D2D1::Ellipse(sc, haloR, haloR), b.Get(), tc.hairlineWidth);
                 }
 
-                D2D1_COLOR_F fillCol = selected ? tc.slotSelectedFill : tc.slotIdleFill;
-                const float slotAlpha = (slot.kind == SlotKind::App && !slot.IsRunning()) ? 0.65f : 1.0f;
-                fillCol.a *= slotAlpha;
-                if (auto b = mkBrush(fillCol))
-                    m_d2dContext->FillEllipse(D2D1::Ellipse(sc, radius, radius), b.Get());
-                if (selected)
-                {
-                    if (auto b = mkBrush(tc.sectorStroke))
-                        m_d2dContext->DrawEllipse(D2D1::Ellipse(sc, radius, radius), b.Get(), 1.6f);
-                }
-
+                // Selected pinned-not-open icons render at full 1.0 alpha!
+                const float iconAlpha = selected ? 1.0f : dimAlpha;
                 if (slot.iconBitmap)
                 {
                     if (auto bmp = GetOrCreateD2DBitmap(slot.iconBitmap.Get()))
                     {
-                        const float iconHalf = static_cast<float>(m_config.iconSizeDip * 0.39) * scale;
+                        const float iconHalf = static_cast<float>(geom.iconSize * 0.46) * scale;
                         const D2D1_RECT_F dst = D2D1::RectF(sc.x - iconHalf, sc.y - iconHalf, sc.x + iconHalf, sc.y + iconHalf);
-                        m_d2dContext->DrawBitmap(bmp.Get(), dst, slotAlpha);
+                        m_d2dContext->DrawBitmap(bmp.Get(), dst, iconAlpha);
                     }
                 }
                 else if (m_glyphFormat)
@@ -1224,20 +1642,27 @@ namespace winrings
                     else if (slot.kind == SlotKind::Website) glyph = L"WEB";
                     else if (!slot.label.empty()) glyph = std::wstring(1, static_cast<wchar_t>(towupper(slot.label[0])));
 
-                    if (auto b = mkBrush(tc.textColor))
+                    D2D1_COLOR_F gc = tc.textColor;
+                    gc.a *= iconAlpha;
+                    if (auto b = mkBrush(gc))
                     {
-                        const D2D1_RECT_F tr = D2D1::RectF(sc.x - radius, sc.y - radius, sc.x + radius, sc.y + radius);
+                        const D2D1_RECT_F tr = D2D1::RectF(sc.x - haloR, sc.y - haloR, sc.x + haloR, sc.y + haloR);
                         m_d2dContext->DrawTextW(glyph.c_str(), static_cast<UINT32>(glyph.size()), m_glyphFormat.Get(), tr, b.Get());
                     }
                 }
 
                 if (slot.windows.size() > 1 && m_smallFormat)
                 {
-                    const D2D1_POINT_2F bc{ sc.x + radius * 0.68f, sc.y - radius * 0.68f };
-                    if (auto b = mkBrush(tc.sectorStroke))
-                        m_d2dContext->FillEllipse(D2D1::Ellipse(bc, 9.0f, 9.0f), b.Get());
+                    const float badgeDist = static_cast<float>(geom.iconSize * 0.46) * scale;
+                    const D2D1_POINT_2F bc{ sc.x + badgeDist, sc.y - badgeDist };
+                    D2D1_COLOR_F badgeBg = tc.accent;
+                    badgeBg.a *= dimAlpha;
+                    if (auto b = mkBrush(badgeBg))
+                        m_d2dContext->FillEllipse(D2D1::Ellipse(bc, 8.5f, 8.5f), b.Get());
+                    D2D1_COLOR_F countCol = Argb(255, 255, 255, 255);
+                    countCol.a *= dimAlpha;
                     const std::wstring countTxt = slot.windows.size() > 9 ? L"9+" : std::to_wstring(slot.windows.size());
-                    if (auto wb = mkBrush(Argb(255, 255, 255, 255)))
+                    if (auto wb = mkBrush(countCol))
                     {
                         m_d2dContext->DrawTextW(countTxt.c_str(), static_cast<UINT32>(countTxt.size()),
                             m_smallFormat.Get(), D2D1::RectF(bc.x - 10, bc.y - 9, bc.x + 10, bc.y + 9), wb.Get());
@@ -1246,9 +1671,12 @@ namespace winrings
             }
         }
 
-        // 4. Submenu cards (outer arc frames, title column rows, folder/collection badges)
-        if (m_expandedSlotIndex >= 0)
+        // 3. Submenu cards (Downloads/Folders/Collections/Search continuous curved half-ring + DWM window frames)
+        if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty())
         {
+            if (curvedArcGeo)
+                DrawCurvedArcTrack(curvedArcGeo.Get(), m_submenuArcLayout, tc, !acrylicActive);
+
             for (size_t i = 0; i < m_submenuCards.size(); ++i)
             {
                 const auto& card = m_submenuCards[i];
@@ -1262,18 +1690,22 @@ namespace winrings
 
                 if (card.subSlot)
                 {
-                    const D2D1_POINT_2F cc{ cx, cy };
-                    D2D1_COLOR_F fill = sel ? tc.slotSelectedFill : tc.centerFill;
-                    if (auto b = mkBrush(fill))
-                        m_d2dContext->FillEllipse(D2D1::Ellipse(cc, hw, hh), b.Get());
-                    if (auto b = mkBrush(sel ? tc.sectorStroke : tc.centerBorder))
-                        m_d2dContext->DrawEllipse(D2D1::Ellipse(cc, hw, hh), b.Get(), sel ? 2.0f : 1.2f);
+                    if (sel)
+                    {
+                        const D2D1_POINT_2F cc{ cx, cy };
+                        const float hoverR = (std::max)(hw, hh) + 4.0f;
+                        D2D1_COLOR_F haloFill = tc.slotSelectedFill;
+                        if (auto b = mkBrush(haloFill))
+                            m_d2dContext->FillEllipse(D2D1::Ellipse(cc, hoverR, hoverR), b.Get());
+                        if (auto b = mkBrush(tc.sectorStroke))
+                            m_d2dContext->DrawEllipse(D2D1::Ellipse(cc, hoverR, hoverR), b.Get(), tc.hairlineWidth);
+                    }
                     if (card.subSlot->iconBitmap)
                     {
                         if (auto bmp = GetOrCreateD2DBitmap(card.subSlot->iconBitmap.Get()))
                         {
-                            const float ih = 14.0f * s;
-                            m_d2dContext->DrawBitmap(bmp.Get(), D2D1::RectF(cx - ih, cy - ih, cx + ih, cy + ih));
+                            const float ih = (std::min)(hw, hh) * 0.92f;
+                            m_d2dContext->DrawBitmap(bmp.Get(), D2D1::RectF(cx - ih, cy - ih, cx + ih, cy + ih), 1.0f);
                         }
                     }
                     else if (m_titleFormat && !card.subSlot->label.empty())
@@ -1285,14 +1717,19 @@ namespace winrings
                 }
                 else if (card.window)
                 {
-                    D2D1_COLOR_F fill = tc.centerFill;
-                    if (card.window->isMinimized)
-                        fill.a *= 0.65f;
-                    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rect, 9.0f, 9.0f);
-                    if (auto b = mkBrush(fill))
-                        m_d2dContext->FillRoundedRectangle(rr, b.Get());
+                    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rect, 8.0f, 8.0f);
+                    if (!acrylicActive)
+                    {
+                        D2D1_COLOR_F fill = tc.centerFill;
+                        if (card.window->isMinimized)
+                            fill.a *= 0.65f;
+                        if (auto b = mkBrush(fill))
+                            m_d2dContext->FillRoundedRectangle(rr, b.Get());
+                    }
+                    if (useNoise)
+                        m_d2dContext->FillRoundedRectangle(rr, m_noiseBrush.Get());
                     if (auto b = mkBrush(sel ? tc.sectorStroke : tc.centerBorder))
-                        m_d2dContext->DrawRoundedRectangle(rr, b.Get(), sel ? 2.2f : 1.2f);
+                        m_d2dContext->DrawRoundedRectangle(rr, b.Get(), sel ? 1.5f : tc.hairlineWidth);
 
                     if (m_smallFormat)
                     {
@@ -1311,19 +1748,24 @@ namespace winrings
             }
         }
 
-        // 5. Drag-and-drop Convert / Actions bar
+        // 4. Drag-and-drop Convert / Actions bar
         if (m_dragActive)
         {
             auto drawDropPill = [&](const RectD& r, const wchar_t* label, bool hot) {
                 const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
                     D2D1::RectF(static_cast<float>(r.left), static_cast<float>(r.top),
                         static_cast<float>(r.Right()), static_cast<float>(r.Bottom())), 21.0f, 21.0f);
-                D2D1_COLOR_F fill = hot ? tc.slotSelectedFill : Argb(235, 30, 36, 48);
-                if (auto b = mkBrush(fill)) m_d2dContext->FillRoundedRectangle(rr, b.Get());
-                if (auto b = mkBrush(tc.accent)) m_d2dContext->DrawRoundedRectangle(rr, b.Get(), hot ? 2.2f : 1.5f);
+                if (!acrylicActive || hot)
+                {
+                    D2D1_COLOR_F fill = hot ? tc.slotSelectedFill : tc.centerFill;
+                    if (auto b = mkBrush(fill)) m_d2dContext->FillRoundedRectangle(rr, b.Get());
+                }
+                if (useNoise)
+                    m_d2dContext->FillRoundedRectangle(rr, m_noiseBrush.Get());
+                if (auto b = mkBrush(tc.accent)) m_d2dContext->DrawRoundedRectangle(rr, b.Get(), hot ? 1.5f : tc.hairlineWidth);
                 if (m_titleFormat)
                 {
-                    if (auto wb = mkBrush(Argb(255, 245, 247, 250)))
+                    if (auto wb = mkBrush(tc.textColor))
                         m_d2dContext->DrawTextW(label, static_cast<UINT32>(wcslen(label)), m_titleFormat.Get(), rr.rect, wb.Get());
                 }
             };
@@ -1331,38 +1773,75 @@ namespace winrings
             drawDropPill(kActionsBadgeDip, L"Actions", m_dragHoverBadge == 2);
         }
 
-        // 6. Center pill badge
+        // 5. Center label / Search Stadium Pill (continuous acrylic interior + razor-thin hairline border)
+        if (hasQuery)
         {
-            const float cw = 122.0f;
-            const float ch = 46.0f;
-            const D2D1_ROUNDED_RECT centerPill = D2D1::RoundedRect(
-                D2D1::RectF(centerPt.x - cw * 0.5f, centerPt.y - ch * 0.5f,
-                            centerPt.x + cw * 0.5f, centerPt.y + ch * 0.5f),
-                ch * 0.5f, ch * 0.5f);
-
-            if (auto b = mkBrush(tc.centerFill))
-                m_d2dContext->FillRoundedRectangle(centerPill, b.Get());
-            if (auto b = mkBrush(tc.centerBorder))
-                m_d2dContext->DrawRoundedRectangle(centerPill, b.Get(), 1.1f);
-
-            const std::wstring summary = BuildFilterSummary();
-            if (m_titleFormat)
+            if (!acrylicActive)
             {
-                D2D1_RECT_F tr = m_filterQuery.empty()
-                    ? D2D1::RectF(centerPill.rect.left + 8, centerPill.rect.top + 2, centerPill.rect.right - 8, centerPill.rect.bottom - 2)
-                    : D2D1::RectF(centerPill.rect.left + 8, centerPill.rect.top + 4, centerPill.rect.right - 8, centerPt.y + 2);
-                if (auto b = mkBrush(tc.textColor))
-                    m_d2dContext->DrawTextW(summary.c_str(), static_cast<UINT32>(summary.size()), m_titleFormat.Get(), tr, b.Get());
+                if (auto b = mkBrush(tc.searchFill))
+                    m_d2dContext->FillRoundedRectangle(searchPill, b.Get());
             }
-            if (!m_filterQuery.empty() && m_smallFormat)
+            if (useNoise)
+                m_d2dContext->FillRoundedRectangle(searchPill, m_noiseBrush.Get());
+            if (auto b = mkBrush(tc.searchBorder))
+                m_d2dContext->DrawRoundedRectangle(searchPill, b.Get(), tc.hairlineWidth);
+
+            // A4S-Menu monochrome #909090 vector magnifier on the left of the search pill
+            if (auto mb = mkBrush(Argb(255, 144, 144, 144)))
             {
-                const D2D1_RECT_F qr = D2D1::RectF(centerPill.rect.left + 8, centerPt.y, centerPill.rect.right - 8, centerPill.rect.bottom - 4);
-                if (auto b = mkBrush(tc.accent))
-                    m_d2dContext->DrawTextW(m_filterQuery.c_str(), static_cast<UINT32>(m_filterQuery.size()), m_smallFormat.Get(), qr, b.Get());
+                const float iconX = searchPill.rect.left + 11.0f;
+                const float iconY = searchPill.rect.top + 6.0f;
+                m_d2dContext->DrawEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(iconX + 5.2f, iconY + 5.2f), 4.6f, 4.6f), mb.Get(), 1.15f);
+                m_d2dContext->DrawLine(
+                    D2D1::Point2F(iconX + 8.6f, iconY + 8.6f),
+                    D2D1::Point2F(iconX + 12.6f, iconY + 12.6f), mb.Get(), 1.25f);
+            }
+
+            if (m_searchFormat)
+            {
+                const D2D1_RECT_F tr = D2D1::RectF(
+                    searchPill.rect.left + 28.0f, searchPill.rect.top, searchPill.rect.right - 10.0f, searchPill.rect.bottom);
+                const D2D1_COLOR_F qCol = m_rankedMatches.empty() ? tc.mutedTextColor : tc.textColor;
+                if (auto b = mkBrush(qCol))
+                    m_d2dContext->DrawTextW(m_filterQuery.c_str(), static_cast<UINT32>(m_filterQuery.size()),
+                        m_searchFormat.Get(), tr, b.Get());
             }
         }
 
+        if (hasSummary)
+        {
+            if (!acrylicActive)
+            {
+                if (auto b = mkBrush(tc.centerFill))
+                    m_d2dContext->FillRoundedRectangle(centerPill, b.Get());
+            }
+            if (useNoise)
+                m_d2dContext->FillRoundedRectangle(centerPill, m_noiseBrush.Get());
+            if (auto b = mkBrush(tc.centerBorder))
+                m_d2dContext->DrawRoundedRectangle(centerPill, b.Get(), tc.hairlineWidth);
+
+            if (m_titleFormat)
+            {
+                const D2D1_COLOR_F lblCol = (hasQuery && m_rankedMatches.empty()) ? tc.mutedTextColor : tc.textColor;
+                if (auto b = mkBrush(lblCol))
+                {
+                    const D2D1_RECT_F tr = D2D1::RectF(
+                        centerPill.rect.left + 10.0f, centerPill.rect.top,
+                        centerPill.rect.right - 10.0f, centerPill.rect.bottom);
+                    m_d2dContext->DrawTextW(summary.c_str(), static_cast<UINT32>(summary.size()),
+                        m_titleFormat.Get(), tr, b.Get());
+                }
+            }
+        }
+        else if (!hasQuery)
+        {
+            if (auto b = mkBrush(tc.idleDotColor))
+                m_d2dContext->FillEllipse(D2D1::Ellipse(centerPt, 3.0f, 3.0f), b.Get());
+        }
+
         const HRESULT endHr = m_d2dContext->EndDraw();
+        m_d2dContext->SetTarget(nullptr);
         if (endHr == D2DERR_RECREATE_TARGET)
         {
             ReleaseGraphicsDevices();
@@ -1370,7 +1849,8 @@ namespace winrings
             return;
         }
         m_swapChain->Present(0, 0);
-        m_dcompDevice->Commit();
+        if (!acrylicActive && m_dcompDevice)
+            m_dcompDevice->Commit();
     }
 
     void RingOverlay::ShowContextMenuAt(POINT screenPt)
@@ -1607,7 +2087,7 @@ namespace winrings
             m_dragHoverBadge = nextBadge;
             m_selectedIndex = nextIndex;
             for (size_t i = 0; i < m_slotScales.size(); ++i)
-                m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? 1.24 : 1.0;
+                m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
             Render();
         }
     }
@@ -1784,33 +2264,38 @@ namespace winrings
             POINT clientPt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             POINT screenPt = clientPt;
             ClientToScreen(m_hwnd, &screenPt);
-            if (!m_hasLastPointer && m_selectedIndex < 0)
+            if (!m_hasLastPointer && m_selectedIndex < 0 && m_selectedSubIndex < 0)
                 UpdatePointer(screenPt.x, screenPt.y);
             const PointD localDip{ clientPt.x / m_dpiScale, clientPt.y / m_dpiScale };
 
             // Support drag-out from Folder/Downloads fan-out items only when clicking that card
             const int hitSub = HitTestSubmenu(localDip);
-            if (m_expandedSlotIndex >= 0 && hitSub >= 0 && hitSub == m_selectedSubIndex &&
-                m_selectedSubIndex < static_cast<int>(m_submenuCards.size()))
+            if (hitSub >= 0 && hitSub < static_cast<int>(m_submenuCards.size()))
             {
-                const auto& card = m_submenuCards[static_cast<size_t>(m_selectedSubIndex)];
-                if (card.subSlot && (card.subSlot->kind == SlotKind::File || card.subSlot->kind == SlotKind::Folder) &&
-                    !card.subSlot->pathOrUrl.empty())
+                m_selectedSubIndex = hitSub;
+                if (m_expandedSlotIndex >= 0)
                 {
-                    if (DragDetect(m_hwnd, screenPt))
+                    const auto& card = m_submenuCards[static_cast<size_t>(hitSub)];
+                    if (card.subSlot && (card.subSlot->kind == SlotKind::File || card.subSlot->kind == SlotKind::Folder) &&
+                        !card.subSlot->pathOrUrl.empty())
                     {
-                        const std::wstring path = card.subSlot->pathOrUrl;
-                        Dismiss();
-                        RingDropTarget::StartFileDragOut(m_hwnd, path);
-                        return 0;
+                        if (DragDetect(m_hwnd, screenPt))
+                        {
+                            const std::wstring path = card.subSlot->pathOrUrl;
+                            Dismiss();
+                            RingDropTarget::StartFileDragOut(m_hwnd, path);
+                            return 0;
+                        }
                     }
                 }
+                CommitSelectionAndClose();
+                return 0;
             }
 
             const double dist = std::hypot(localDip.x - kCenterDip, localDip.y - kCenterDip);
             if (dist <= m_config.deadzoneDip)
             {
-                Dismiss();
+                HandleEscapeKey();
                 return 0;
             }
             CommitSelectionAndClose();

@@ -8,6 +8,8 @@
 #include "../src/shared/CrashGuard.h"
 #include "../src/shared/DropNaming.h"
 #include "../src/shared/RadialMath.h"
+#include "../src/shared/RingThemeEngine.h"
+#include "../src/shared/SearchMatch.h"
 #include "../src/shared/WinRingsConfig.h"
 
 using namespace winrings;
@@ -80,7 +82,17 @@ static void TestDownloadsAndSubmenuHoverTransitions()
     constexpr double kRingR = 112.0;
     constexpr double kIconSize = 42.0;
     const double mainRingOuterR = MainRingOuterRadius(kRingR, kIconSize);
-    CHECK(std::abs(mainRingOuterR - 150.0) < 0.01);
+    CHECK(std::abs(mainRingOuterR - 145.0) < 0.01);
+
+    const RingGeometry a4sGeo = ComputeRingGeometry(8, 115.0, 44.0, 18.0);
+    CHECK(std::abs(a4sGeo.ringRadius - 115.0) < 0.01);
+    CHECK(std::abs(a4sGeo.outerRadius - 149.0) < 0.01);
+    CHECK(a4sGeo.holeRadius > 18.0 && a4sGeo.holeRadius < a4sGeo.bandRadius);
+
+    const IconArcLayout topSearchArc = ComputeIconArcLayout(kCenter.x, kCenter.y, -kPi * 0.5, a4sGeo.outerRadius, 6);
+    CHECK(topSearchArc.rects.size() == 6);
+    CHECK(std::abs(topSearchArc.trackWidthDip - 56.0) < 0.01);
+    CHECK(std::abs((topSearchArc.startAngleRad + topSearchArc.endAngleRad) * 0.5 - (-kPi * 0.5)) < 0.01);
 
     // 1. Exact Bug 1 reproduction: Downloads (Folder, slot 1) with 8 items in 3-, 6-, 8-, and 14-slot rings.
     const int ringSizes[] = { 3, 6, 8, 14 };
@@ -166,9 +178,11 @@ static void TestDownloadsAndSubmenuHoverTransitions()
             CHECK(cardRes.keepExistingSubmenu);
         }
 
-        // Gap between offset +2 (index 3) and offset +3 (index 5) along outer radius 208 keeps Downloads open.
-        const double gapAngle = dlAngle + 2.5 * 0.30;
-        const PointD gapPt{ kCenter.x + 208.0 * std::cos(gapAngle), kCenter.y + 208.0 * std::sin(gapAngle) };
+        // Gap between adjacent items along the continuous half-ring track keeps Downloads open.
+        const auto dlArc = ComputeIconArcLayout(kCenter.x, kCenter.y, dlAngle, mainRingOuterR, 8);
+        CHECK(dlArc.angles.size() == 8);
+        const double gapAngle = 0.5 * (dlArc.angles[0] + dlArc.angles[1]);
+        const PointD gapPt{ kCenter.x + dlArc.arcRadius * std::cos(gapAngle), kCenter.y + dlArc.arcRadius * std::sin(gapAngle) };
         const auto gapRes = ResolveRingHover(
             gapPt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
             downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
@@ -185,15 +199,31 @@ static void TestDownloadsAndSubmenuHoverTransitions()
         CHECK(backRes.keepExistingSubmenu);
         CHECK(backRes.updateCorridorOrigin);
 
-        // Moving far past the opposite side of the outer arc switches to the opposite slot.
+        // Moving far outside the opposite side of the ring MUST NOT select an unhovered icon / invisible PiP.
         const int oppositeSlot = (downloadsSlot + slotCount / 2) % slotCount;
         const double oppAngle = GetSlotAngle(oppositeSlot, slotCount);
         const PointD farOpp{ kCenter.x + 230.0 * std::cos(oppAngle), kCenter.y + 230.0 * std::sin(oppAngle) };
         const auto oppRes = ResolveRingHover(
             farOpp, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
             downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
-        CHECK(oppRes.selectedSlot == oppositeSlot);
+        CHECK(oppRes.selectedSlot == -1);
+        CHECK(oppRes.selectedSubIndex == -1);
         CHECK(!oppRes.keepExistingSubmenu);
+
+        // Bounded outer reach: sticky (12 DIP) rejects r = mainRingOuterR + 40, while holding reach (48 DIP) selects oppositeSlot.
+        const PointD midOutOpp{
+            kCenter.x + (mainRingOuterR + 40.0) * std::cos(oppAngle),
+            kCenter.y + (mainRingOuterR + 40.0) * std::sin(oppAngle)
+        };
+        const auto stickyFarRes = ResolveRingHover(
+            midOutOpp, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false, 12.0);
+        CHECK(stickyFarRes.selectedSlot == -1);
+        const auto holdFarRes = ResolveRingHover(
+            midOutOpp, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false, 48.0);
+        CHECK(holdFarRes.selectedSlot == oppositeSlot);
+        CHECK(!holdFarRes.keepExistingSubmenu);
     }
 
     // 2. Multi-window App in OuterArc mode across thumbnailScale = 0.5, 1.0, 1.5 (up to 9 windows).
@@ -384,8 +414,10 @@ static void TestDownloadsAndSubmenuHoverTransitions()
         stepPointer(card0);
         CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == 0);
 
+        const auto simArc = ComputeIconArcLayout(kCenter.x, kCenter.y, dlAngle, mainRingOuterR, 8);
+        const double simGapAngle = 0.5 * (simArc.angles[4] + simArc.angles[5]);
         const PointD card5{ subCards[5].left + subCards[5].width * 0.5, subCards[5].top + subCards[5].height * 0.5 };
-        stepPointer({ kCenter.x + 208.0 * std::cos(dlAngle + 2.5 * 0.30), kCenter.y + 208.0 * std::sin(dlAngle + 2.5 * 0.30) });
+        stepPointer({ kCenter.x + simArc.arcRadius * std::cos(simGapAngle), kCenter.y + simArc.arcRadius * std::sin(simGapAngle) });
         CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == -1);
         stepPointer(card5);
         CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == 5);
@@ -464,6 +496,24 @@ static void TestCrashGuard()
     CHECK(s.disabled && s.abnormalExitCount == 3);
 }
 
+static void TestSearchScoring()
+{
+    CHECK(ScoreSearchMatch(L"Visual Studio Code", L"vis") == 0);
+    CHECK(ScoreSearchMatch(L"Visual Studio Code", L"code") == 1);
+    CHECK(ScoreSearchMatch(L"PowerShell", L"ps") == 2);
+    CHECK(ScoreSearchMatch(L"Visual Studio Code", L"vs") == 2);
+    CHECK(ScoreSearchMatch(L"File Explorer", L"fe") == 2);
+    CHECK(ScoreSearchMatch(L"Notepad", L"tepa") == 3);
+    CHECK(ScoreSearchMatch(L"Notepad", L"xyz") == -1);
+    CHECK(ScoreSearchMatch(L"Helium", L"") == -1);
+
+    const std::vector<std::wstring> heliumAliases = { L"chrome", L"Helium", L"Chromium" };
+    CHECK(ScoreAliases(heliumAliases, L"hel") == 0);
+    CHECK(ScoreAliases(heliumAliases, L"chr") == 0);
+    CHECK(ScoreAliases(heliumAliases, L"ium") == 3);
+    CHECK(ScoreAliases(heliumAliases, L"nomatch") == -1);
+}
+
 static void TestConfigRoundTripAndDropNaming()
 {
     wchar_t tempDir[MAX_PATH]{};
@@ -473,11 +523,26 @@ static void TestConfigRoundTripAndDropNaming()
 
     const std::wstring cfgPath = testDir + L"\\config.json";
     SwitcherConfig orig = SwitcherConfig::CreateDefault();
+    CHECK(orig.version == 3);
+    CHECK(orig.theme == RingTheme::A4S);
+    CHECK(orig.glassLevel == 50);
+    CHECK(orig.lightDarkMode == 0);
+    CHECK(orig.accentColor == L"#0078D4");
+    CHECK(orig.SaveToFile(cfgPath));
+    SwitcherConfig loadedDefault;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, loadedDefault));
+    CHECK(loadedDefault.version == 3);
+    CHECK(loadedDefault.theme == RingTheme::A4S);
+    CHECK(loadedDefault.glassLevel == 50);
+    CHECK(loadedDefault.lightDarkMode == 0);
+
     orig.mouseTrigger = MouseTriggerButton::Middle;
     orig.topBarHeightDip = 32;
     orig.topBarClockFormat = L"ddd d MMM  h:mm tt";
     orig.topBarClockCasing = ClockCasing::CompactLower;
-    orig.theme = RingTheme::Aura;
+    orig.theme = RingTheme::DarkWood;
+    orig.glassLevel = 86;
+    orig.lightDarkMode = 15;
     orig.accentColor = L"#FF5522";
     orig.menuKeyEnabled = true;
     orig.interceptWinTab = true;
@@ -493,7 +558,9 @@ static void TestConfigRoundTripAndDropNaming()
     CHECK(loaded.topBarHeightDip == 32);
     CHECK(loaded.topBarClockFormat == L"ddd d MMM  h:mm tt");
     CHECK(loaded.topBarClockCasing == ClockCasing::CompactLower);
-    CHECK(loaded.theme == RingTheme::Aura);
+    CHECK(loaded.theme == RingTheme::DarkWood);
+    CHECK(loaded.glassLevel == 86);
+    CHECK(loaded.lightDarkMode == 15);
     CHECK(loaded.accentColor == L"#FF5522");
     CHECK(loaded.menuKeyEnabled == true);
     CHECK(loaded.interceptWinTab == true);
@@ -501,6 +568,35 @@ static void TestConfigRoundTripAndDropNaming()
     CHECK(loaded.pinnedSlots[3].kind == SlotKind::Collection);
     CHECK(loaded.pinnedSlots[3].items.size() == 1);
     CHECK(loaded.pinnedSlots[3].items[0].pathOrUrl == L"https://example.com");
+
+    orig.theme = RingTheme::Blue;
+    orig.glassLevel = 45;
+    orig.lightDarkMode = 80;
+    CHECK(orig.SaveToFile(cfgPath));
+    SwitcherConfig loadedBlue;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, loadedBlue));
+    CHECK(loadedBlue.theme == RingTheme::Blue);
+    CHECK(loadedBlue.glassLevel == 45);
+    CHECK(loadedBlue.lightDarkMode == 80);
+
+    SwitcherConfig clamped;
+    CHECK(SwitcherConfig::ParseJsonUtf8(
+        "{\"version\":3,\"theme\":\"DarkWood\",\"glassLevel\":150,\"lightDarkMode\":-25}",
+        clamped));
+    CHECK(clamped.theme == RingTheme::DarkWood);
+    CHECK(clamped.glassLevel == 100);
+    CHECK(clamped.lightDarkMode == 0);
+
+    for (const char* legacyJson : {
+        "{\"version\":2,\"theme\":\"LiquidGlass\"}",
+        "{\"version\":2,\"theme\":\"Glass\"}",
+        "{\"version\":2,\"theme\":\"Aura\"}"
+    })
+    {
+        SwitcherConfig legacyCfg;
+        CHECK(SwitcherConfig::ParseJsonUtf8(legacyJson, legacyCfg));
+        CHECK(legacyCfg.theme == RingTheme::A4S);
+    }
 
     SwitcherConfig bad;
     CHECK(!SwitcherConfig::ParseJsonUtf8("{ not valid json", bad));
@@ -524,13 +620,74 @@ static void TestConfigRoundTripAndDropNaming()
     RemoveDirectoryW(testDir.c_str());
 }
 
+static void TestThemeMaterialEngine()
+{
+    SwitcherConfig a4s = SwitcherConfig::CreateDefault();
+    const RingMaterialSpec mA4s = ComputeRingMaterial(a4s, 1.0);
+    CHECK(std::abs(mA4s.tintR - (32.0f / 255.0f)) < 0.002f);
+    CHECK(std::abs(mA4s.tintAlpha - (128.0f / 255.0f)) < 0.002f);
+    CHECK(std::abs(mA4s.blurSigma - 30.0f) < 0.05f);
+    CHECK(mA4s.luminosityAlpha > 0.30f);
+    CHECK(mA4s.noiseOpacity > 0.03f);
+    CHECK(mA4s.borderColorRef == RGB(62, 62, 62));
+    CHECK(mA4s.ringStrokeWidth <= 0.85f);
+    CHECK(mA4s.isLightText);
+    CHECK(std::abs(mA4s.hoverRevealColor.r - (52.0f / 255.0f)) < 0.005f);
+    CHECK(std::abs(mA4s.hoverRevealColor.g - (99.0f / 255.0f)) < 0.005f);
+    CHECK(std::abs(mA4s.hoverRevealColor.b - (141.0f / 255.0f)) < 0.005f);
+
+    SwitcherConfig a4sLight = a4s;
+    a4sLight.lightDarkMode = 100;
+    const RingMaterialSpec mLight = ComputeRingMaterial(a4sLight, 1.0);
+    CHECK(mLight.tintR > 0.90f && mLight.tintG > 0.90f && mLight.tintB > 0.90f);
+    CHECK(!mLight.isLightText);
+    CHECK(mLight.textColor.r < 0.20f);
+
+    SwitcherConfig customAcc = a4s;
+    customAcc.accentColor = L"#FF5522";
+    const RingMaterialSpec mAcc = ComputeRingMaterial(customAcc, 1.0);
+    CHECK(mAcc.accentColorRef == RGB(0xFF, 0x55, 0x22));
+    CHECK(std::abs(mAcc.hoverRevealColor.r - 1.0f) < 0.005f);
+
+    SwitcherConfig dw = a4s;
+    dw.theme = RingTheme::DarkWood;
+    dw.glassLevel = 86;
+    const RingMaterialSpec mDw = ComputeRingMaterial(dw, 1.0);
+    CHECK(mDw.tintAlpha > 0.80f);
+    CHECK(mDw.blurSigma < 3.0f);
+
+    SwitcherConfig blue = a4s;
+    blue.theme = RingTheme::Blue;
+    blue.glassLevel = 45;
+    const RingMaterialSpec mBlue = ComputeRingMaterial(blue, 1.0);
+    CHECK(mBlue.tintB > mBlue.tintR);
+    CHECK(mBlue.accentColorRef == RGB(49, 134, 255));
+    CHECK(mBlue.blurSigma > 25.0f);
+
+    const std::vector<uint8_t> noise = GenerateAcrylicNoiseBgra256();
+    CHECK(noise.size() == 256u * 256u * 4u);
+    uint8_t minLuma = 255, maxLuma = 0;
+    bool premulOk = true;
+    for (size_t i = 0; i < noise.size(); i += 4u)
+    {
+        if (noise[i + 0] > noise[i + 3] || noise[i + 1] > noise[i + 3] || noise[i + 2] > noise[i + 3])
+            premulOk = false;
+        if (noise[i + 0] < minLuma) minLuma = noise[i + 0];
+        if (noise[i + 0] > maxLuma) maxLuma = noise[i + 0];
+    }
+    CHECK(premulOk);
+    CHECK(maxLuma > minLuma + 80);
+}
+
 int wmain()
 {
     TestRadialMath();
     TestDownloadsAndSubmenuHoverTransitions();
+    TestSearchScoring();
     TestClockFormat();
     TestCrashGuard();
     TestConfigRoundTripAndDropNaming();
+    TestThemeMaterialEngine();
 
     if (g_failures == 0)
     {

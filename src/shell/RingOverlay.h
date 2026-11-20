@@ -15,6 +15,7 @@
 
 #include "../shared/RadialMath.h"
 #include "../shared/WinRingsConfig.h"
+#include "AcrylicBackdrop.h"
 #include "DropTarget.h"
 #include "DwmThumbPool.h"
 #include "SlotModel.h"
@@ -22,6 +23,8 @@
 
 namespace winrings
 {
+    class AppIndex;
+
     class RingOverlay
     {
     public:
@@ -40,7 +43,8 @@ namespace winrings
         RingOverlay(const RingOverlay&) = delete;
         RingOverlay& operator=(const RingOverlay&) = delete;
 
-        bool Initialize(HINSTANCE instance, HMODULE shellModule, WindowTracker* tracker, Callbacks callbacks);
+        bool Initialize(HINSTANCE instance, HMODULE shellModule, WindowTracker* tracker, Callbacks callbacks,
+            AppIndex* appIndex = nullptr);
         void Shutdown();
 
         void SetConfig(const SwitcherConfig& config);
@@ -57,6 +61,7 @@ namespace winrings
         void UpdatePointer(int physicalX, int physicalY);
         void HandleScrollWheel(int wheelDelta);
         void CommitSelectionAndClose();
+        void HandleEscapeKey();
         void Dismiss();
 
         void AppendFilterChar(wchar_t ch);
@@ -72,25 +77,15 @@ namespace winrings
             double targetScale = 1.0;
         };
 
-        struct ThemeColors
+        struct RankedMatch
         {
-            D2D1_COLOR_F ringFill{};
-            D2D1_COLOR_F auraOuter{};
-            bool useAuraGradient = false;
-            D2D1_COLOR_F ringStroke{};
-            float ringStrokeWidth = 1.5f;
-            D2D1_COLOR_F innerFill{};
-            D2D1_COLOR_F slotIdleFill{};
-            D2D1_COLOR_F slotSelectedFill{};
-            D2D1_COLOR_F sectorFill{};
-            D2D1_COLOR_F sectorStroke{};
-            D2D1_COLOR_F centerFill{};
-            D2D1_COLOR_F centerBorder{};
-            D2D1_COLOR_F textColor{};
-            D2D1_COLOR_F accent{};
-            COLORREF accentColorRef = RGB(49, 134, 255);
-            COLORREF borderColorRef = RGB(70, 78, 92);
+            bool isRingSlot = true;
+            int index = -1;
+            int tier = 99;
+            size_t nameLen = 0;
         };
+
+        using ThemeColors = RingMaterialSpec;
 
         static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
         LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
@@ -98,9 +93,12 @@ namespace winrings
         bool CreateGraphicsDevices();
         void ReleaseGraphicsDevices();
         bool EnsureSwapChainSize(int widthPx, int heightPx);
+        void EnsureNoiseBrush();
         Microsoft::WRL::ComPtr<ID2D1Bitmap1> GetOrCreateD2DBitmap(IWICBitmapSource* wicSource);
 
+        RingGeometry ActiveGeometry() const noexcept;
         void UpdateDpiAndPosition(int physicalX, int physicalY);
+        AcrylicMaterialParams BuildAcrylicMaterial() const noexcept;
         ThemeColors BuildThemeColors() const noexcept;
         void RebuildLayoutAfterFilter();
         bool SlotHasSubmenuItems(const RingSlot& slot) const noexcept;
@@ -109,6 +107,9 @@ namespace winrings
         int HitTestSubmenu(PointD localDip) const noexcept;
         void SyncDwmThumbnails();
         void StepAnimations();
+        Microsoft::WRL::ComPtr<ID2D1Geometry> BuildAnnulusGeometry(float outerR, float holeR) const;
+        Microsoft::WRL::ComPtr<ID2D1Geometry> BuildCurvedArcGeometry(const IconArcLayout& arc) const;
+        void DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill);
         void Render();
         void ActivateSlotOrWindow(const RingSlot* slot, const WindowEntry* win, bool shiftHeld);
         void ShowContextMenuAt(POINT screenPt);
@@ -123,6 +124,7 @@ namespace winrings
         HINSTANCE m_instance = nullptr;
         HMODULE m_shellModule = nullptr;
         WindowTracker* m_tracker = nullptr;
+        AppIndex* m_appIndex = nullptr;
         Callbacks m_callbacks;
         SwitcherConfig m_config;
 
@@ -140,12 +142,18 @@ namespace winrings
         Microsoft::WRL::ComPtr<IDWriteFactory> m_dwriteFactory;
         Microsoft::WRL::ComPtr<IDWriteTextFormat> m_titleFormat;
         Microsoft::WRL::ComPtr<IDWriteTextFormat> m_smallFormat;
+        Microsoft::WRL::ComPtr<IDWriteTextFormat> m_searchFormat;
         Microsoft::WRL::ComPtr<IDWriteTextFormat> m_glyphFormat;
         Microsoft::WRL::ComPtr<IDCompositionDevice> m_dcompDevice;
         Microsoft::WRL::ComPtr<IDCompositionTarget> m_dcompTarget;
         Microsoft::WRL::ComPtr<IDCompositionVisual> m_dcompVisual;
         Microsoft::WRL::ComPtr<IDXGISwapChain1> m_swapChain;
         Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_targetBitmap;
+        Microsoft::WRL::ComPtr<IDXGISwapChain1> m_maskSwapChain;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_maskTargetBitmap;
+        AcrylicBackdrop m_acrylicBackdrop;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_noiseBitmap;
+        Microsoft::WRL::ComPtr<ID2D1BitmapBrush> m_noiseBrush;
         int m_swapWidthPx = 0;
         int m_swapHeightPx = 0;
 
@@ -154,7 +162,14 @@ namespace winrings
         // Runtime ring state
         std::vector<RingSlot> m_allSlots;
         std::vector<RingSlot> m_visibleSlots;
+        std::vector<bool> m_slotSearchMatched;
         std::vector<double> m_slotScales;
+        std::vector<RingSlot> m_searchResultSlots;
+        std::vector<RankedMatch> m_rankedMatches;
+        int m_rankedMatchCursor = -1;
+        bool m_searchArcActive = false;
+        bool m_submenuHasArcTrack = false;
+        IconArcLayout m_submenuArcLayout{};
         std::vector<SubmenuCard> m_submenuCards;
         std::vector<RectD> m_submenuCardRects;
 
@@ -168,6 +183,8 @@ namespace winrings
         bool m_submenuIsTitleColumn = false;
         bool m_hasLastPointer = false;
         POINT m_lastPointerPhysical{};
+        bool m_searchMouseLocked = false;
+        PointD m_searchMouseAnchorDip{};
         std::wstring m_filterQuery;
 
         bool m_isOpen = false;

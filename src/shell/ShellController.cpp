@@ -17,6 +17,7 @@
 #include "../shared/WinRingsApi.h"
 #include "../shared/WinRingsConfig.h"
 #include "../shared/WinRingsIdentity.h"
+#include "AppIndex.h"
 #include "InputEngine.h"
 #include "RingOverlay.h"
 #include "SlotModel.h"
@@ -469,13 +470,14 @@ namespace winrings
                         PostQuitMessage(0);
                 };
 
-                if (!m_overlay.Initialize(m_shellModule, m_shellModule, &m_tracker, std::move(overlayCb)))
+                if (!m_overlay.Initialize(m_shellModule, m_shellModule, &m_tracker, std::move(overlayCb), &m_appIndex))
                 {
                     m_tracker.Shutdown();
                     if (!forPreview)
                         PostStatusToHost(WINRINGS_DLL_STATUS_FAILED);
                     return;
                 }
+                m_appIndex.StartAsyncRefresh();
                 m_overlay.SetConfig(m_config);
 
                 InputEngine::Callbacks inputCb{};
@@ -527,7 +529,7 @@ namespace winrings
                 };
                 inputCb.onCancelRequested = [this]() {
                     if (m_overlay.IsOpen())
-                        m_overlay.Dismiss();
+                        m_overlay.HandleEscapeKey();
                 };
                 inputCb.onToggleRequested = [this]() {
                     ToggleStickyRing();
@@ -600,6 +602,7 @@ namespace winrings
                 if (m_overlay.IsOpen())
                     m_overlay.Dismiss();
                 m_overlay.Shutdown();
+                m_appIndex.Shutdown();
                 m_tracker.Shutdown();
                 DestroyPillWindow();
 
@@ -628,8 +631,9 @@ namespace winrings
             void OpenRingAt(int x, int y, bool lockOpen)
             {
                 m_tracker.RecordForegroundBeforeOpen(m_overlay.Hwnd());
+                m_appIndex.EnsureFreshAsync();
                 auto slots = SlotModel::BuildRingSlots(
-                    m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory());
+                    m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex);
                 m_overlay.OpenAt(x, y, std::move(slots), lockOpen);
             }
 
@@ -900,6 +904,7 @@ namespace winrings
             uint64_t m_topBarHookAppliedGen = 0;
 
             SwitcherConfig m_config;
+            AppIndex m_appIndex;
             WindowTracker m_tracker;
             RingOverlay m_overlay;
             InputEngine m_input;

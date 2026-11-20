@@ -2,6 +2,7 @@
 
 #include <d2d1.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <wincodec.h>
 #include <windowsx.h>
 #include <wrl/client.h>
@@ -382,7 +383,7 @@ namespace winrings::tools
                 if (!m_rt)
                     return;
                 m_rt->BeginDraw();
-                m_rt->Clear(D2D1::ColorF(0.09f, 0.105f, 0.135f, 1.0f));
+                m_rt->Clear(D2D1::ColorF(28.0f / 255.0f, 28.0f / 255.0f, 30.0f / 255.0f, 1.0f));
 
                 if (m_bitmap)
                 {
@@ -425,15 +426,28 @@ namespace winrings::tools
                 {
                 case WM_CREATE:
                 {
+                    if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+                    {
+                        using SetPreferredAppModeFn = int (WINAPI*)(int);
+                        if (auto setMode = reinterpret_cast<SetPreferredAppModeFn>(
+                            GetProcAddress(ux, MAKEINTRESOURCEA(135))))
+                            setMode(2);
+                        FreeLibrary(ux);
+                    }
                     const BOOL dark = TRUE;
-                    DwmSetWindowAttribute(m_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+                    DwmSetWindowAttribute(m_hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+                    const int corner = 2; // DWMWCP_ROUND
+                    DwmSetWindowAttribute(m_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
+                    const COLORREF border = RGB(62, 62, 62);
+                    DwmSetWindowAttribute(m_hwnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
                     m_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
                     auto btn = [&](const wchar_t* text, DWORD style, int x, int w, int id) {
                         HWND c = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | style,
                             x, 8, w, 28, m_hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), m_instance, nullptr);
                         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+                        SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
                     };
                     btn(L"Solid Black", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP, 12, 92, kIdSolid);
                     btn(L"Blur", BS_AUTORADIOBUTTON | BS_PUSHLIKE, 110, 72, kIdBlur);

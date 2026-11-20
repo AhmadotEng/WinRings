@@ -74,14 +74,11 @@ namespace winrings
     {
         switch (v)
         {
-        case RingTheme::LiquidGlass: return L"LiquidGlass";
-        case RingTheme::Glass: return L"Glass";
-        case RingTheme::Kiwi: return L"Kiwi";
-        case RingTheme::Aura: return L"Aura";
-        case RingTheme::Orbit: return L"Orbit";
-        case RingTheme::Outline: return L"Outline";
+        case RingTheme::A4S: return L"A4S";
+        case RingTheme::DarkWood: return L"DarkWood";
+        case RingTheme::Blue: return L"Blue";
         }
-        return L"LiquidGlass";
+        return L"A4S";
     }
 
     const wchar_t* ToString(TopBarBackdrop v) noexcept
@@ -669,14 +666,20 @@ namespace winrings
         if (TryGetWString(*obj, "theme", s))
         {
             cfg.theme = ParseEnum<RingTheme>(s, cfg.theme, {
-                { L"LiquidGlass", RingTheme::LiquidGlass },
-                { L"Glass", RingTheme::Glass },
-                { L"Kiwi", RingTheme::Kiwi },
-                { L"Aura", RingTheme::Aura },
-                { L"Orbit", RingTheme::Orbit },
-                { L"Outline", RingTheme::Outline }
+                { L"A4S", RingTheme::A4S },
+                { L"A4SMenu", RingTheme::A4S },
+                { L"DarkWood", RingTheme::DarkWood },
+                { L"Blue", RingTheme::Blue },
+                { L"LiquidGlass", RingTheme::A4S },
+                { L"Glass", RingTheme::A4S },
+                { L"Kiwi", RingTheme::A4S },
+                { L"Aura", RingTheme::A4S },
+                { L"Orbit", RingTheme::A4S },
+                { L"Outline", RingTheme::A4S }
             });
         }
+        TryGetInt(*obj, "glassLevel", cfg.glassLevel);
+        TryGetInt(*obj, "lightDarkMode", cfg.lightDarkMode);
         TryGetWString(*obj, "accentColor", cfg.accentColor);
         TryGetBool(*obj, "pointerFollow", cfg.pointerFollow);
         TryGetBool(*obj, "shiftCenterOnActiveMonitor", cfg.shiftCenterOnActiveMonitor);
@@ -730,6 +733,8 @@ namespace winrings
         cfg.ringRadiusDip = std::clamp(cfg.ringRadiusDip, 72.0, 240.0);
         cfg.iconSizeDip = std::clamp(cfg.iconSizeDip, 24.0, 72.0);
         cfg.thumbnailScale = std::clamp(cfg.thumbnailScale, 0.5, 2.0);
+        cfg.glassLevel = std::clamp(cfg.glassLevel, 0, 100);
+        cfg.lightDarkMode = std::clamp(cfg.lightDarkMode, 0, 100);
         cfg.maxSlots = std::clamp(cfg.maxSlots, 4, 24);
         cfg.topBarHeightDip = std::clamp(cfg.topBarHeightDip, 24, 52);
 
@@ -788,6 +793,8 @@ namespace winrings
         addWStr("windowViewMode", ToString(windowViewMode));
         addBool("fanOutSingleWindow", fanOutSingleWindow);
         addWStr("theme", ToString(theme));
+        addInt("glassLevel", glassLevel);
+        addInt("lightDarkMode", lightDarkMode);
         addWStr("accentColor", accentColor);
         addBool("pointerFollow", pointerFollow);
         addBool("shiftCenterOnActiveMonitor", shiftCenterOnActiveMonitor);
@@ -891,7 +898,19 @@ namespace winrings
         SwitcherConfig cfg;
         const std::wstring path = ConfigPath();
         if (LoadFromFile(path, cfg))
+        {
+            if (cfg.version < 3)
+            {
+                cfg.theme = RingTheme::A4S;
+                cfg.glassLevel = 50;
+                cfg.lightDarkMode = 0;
+                if (_wcsicmp(cfg.accentColor.c_str(), L"#3186FF") == 0)
+                    cfg.accentColor = L"#0078D4";
+                cfg.version = 3;
+                cfg.SaveToFile(path);
+            }
             return cfg;
+        }
 
         cfg = CreateDefault();
         cfg.SaveToFile(path);

@@ -6,8 +6,16 @@ This guide covers all user-facing triggers, radial switcher workflows, Unified M
 
 ## 1. Opening & Navigating the Radial Ring
 
+### Visual Styles & Appearance (`WinRingsTools.exe --settings` -> Appearance)
+Configured on the **Appearance** page (with a persistent 1:1 GPU preview shared across **Appearance**, **Pins & Folders**, and **Advanced**):
+- **`A4S` (`A4S Menu`, Default):** Live wallpaper-reactive frosted acrylic (`RGB(32,32,32)` base tint at `128/255` alpha, 30 px Gaussian blur, luminosity adaptation, `256x256` frosted noise grain, `#3E3E3E` razor-thin `<= 0.85 DIP` hairline rims, and `#34638D` radial pointer reveal).
+- **`DarkWood` (`Dark Wood`):** Matte `#202020` dark surface.
+- **`Blue` (`Blue`):** Classic `#3186FF` sapphire glass look.
+- **Glass Level (`0–100%`, `glassLevel`):** Controls acrylic opacity and blur balance (default `50%`).
+- **Light / Dark Mode (`0–100%`, `lightDarkMode`):** Smoothly transitions material tone between dark (`0%`) and light (`100%`).
+
 ### Mouse Triggers
-Configured via `mouseTrigger` in `%APPDATA%\WinRings\config.json` or Tab 1 (**Triggers & Input**) of `WinRingsTools.exe --settings`:
+Configured via `mouseTrigger` in `%APPDATA%\WinRings\config.json` or the **Triggers & Input** page of `WinRingsTools.exe --settings`:
 - **`SideBack` (Default):** Mouse Back button (`XButton1`).
 - **`SideForward`:** Mouse Forward button (`XButton2`).
 - **`Middle`:** Middle mouse wheel button.
@@ -17,10 +25,10 @@ Configured via `mouseTrigger` in `%APPDATA%\WinRings\config.json` or Tab 1 (**Tr
 1. **Quick-Tap Sticky Mode (`< 180 ms`):**
    - Tap and release the trigger button quickly.
    - The Ring stays open on screen.
-   - Left-click any slot or outer submenu item to activate it, middle-click a window preview to close that window, type letters on the keyboard to filter windows by title, press `1–9` or Arrow keys + `Enter`, or press `Esc` / click inside the center hub to close.
+   - Left-click any slot or outer submenu item to activate it, middle-click a window preview to close that window, type letters on the keyboard to search installed system apps (with a floating search pill above the Ring, live slot highlighting for pinned/running apps, and a curved top half-ring for unpinned system apps), press `1–9` or Arrow keys + `Enter`, or press `Esc` / click inside the center hub to close.
 2. **Hold-Flick-Release Mode (`>= 180 ms`):**
-   - Press and hold the trigger button, move the cursor outside the `18 DIP` deadzone toward a slot (or out onto an expanded outer-arc preview), and release the button to switch immediately.
-3. **Double-Tap Last App (`< 320 ms`):**
+   - Press and hold the trigger button, move the cursor outside the `18 DIP` deadzone into the ring annulus (or out onto an expanded outer-arc preview), and release the button to switch immediately.
+3. **Double-Tap Last App (`< 280 ms`):**
    - Double-tap the mouse trigger button to immediately toggle back to the previously active application window.
 
 ### Keyboard Triggers

@@ -2,6 +2,37 @@
 
 All notable changes to **WinRings** are documented in this file.
 
+## [v2.0.0] - 2026-11-21 (Release 2)
+
+### Added & Improved
+
+- **A4S Menu Environment-Reactive Frosted Acrylic Engine (`src/shared/RingThemeEngine.h`, `src/shell/AcrylicBackdrop.cpp`):**
+  - Unified material and frosted-grain specification (`RingMaterialSpec`, `ComputeRingMaterial`, `GenerateAcrylicNoiseBgra256`) shared across `WinRingsShell.dll`, `WinRingsTools.exe`, and `WinRingsTests.exe`.
+  - Live Windows 11 desktop backdrop composition (`Windows::UI::Composition::Compositor::CreateHostBackdropBrush`) with `DWMWA_USE_HOSTBACKDROPBRUSH` (`17`), `DwmExtendFrameIntoClientArea({-1, -1, -1, -1})`, `WCA_FORCE_ACTIVEWINDOW_APPEARANCE` (`15`), and a strict-tree `GaussianBlur (30 px) -> Saturation -> Blend(D2D1_BLEND_MODE_LUMINOSITY) -> Composite(SOURCE_OVER)` effect pipeline paired with a tiled `256x256` frosted noise grain texture (`m_noiseBrush`).
+  - Authoritative **A4S Menu** material profile (`RGB(32,32,32)` base tint, `128/255` alpha at `glassLevel = 50`, `RGB(62,62,62)` / `#3E3E3E` razor-thin outer & inner hairline borders `<= 0.85 DIP`, `#34638D` radial pointer reveal, `#515151` search border) alongside **Dark Wood** (matte `#202020`) and **Blue** (`#3186FF` sapphire glass) visual presets.
+  - Continuous **Glass Level (`0–100%`)** and **Light / Dark Mode (`0–100%`)** sliders for real-time control over acrylic translucency, luminosity blend, and surface tone.
+
+- **True Annulus Ring Geometry, Curved Submenu Arcs & Refined Hit-Testing (`src/shell/RingOverlay.cpp`, `src/shared/RadialMath.h`):**
+  - Dual-swap-chain composition (`m_acrylicSwapChain` clipped to the ring annulus, curved outer-arc bands, window cards, and floating pills + `m_fgSwapChain` for icons, typography, and hairline rims) with a completely transparent center opening (`holeRadius = 60 DIP`, `outerRadius = 148 DIP`, `ringRadius = 112 DIP`, `iconSize = 42 DIP`) and no shaded inner disc or blue wedge fill.
+  - Strictly bounded main-ring hover band (`dist >= ringDeadzoneDip && dist <= outerRadius + 14 DIP`) so moving into empty outer space never accidentally selects an unexpanded slot, while active outer-arc submenus remain reachable through their angular hover corridor.
+  - **Curved Half-Ring Outer Submenus:** `Downloads`, `Folder`, and `Collection` submenus now render inside a continuous curved frosted acrylic arc band (`ComputeIconArcLayout`) rather than isolated circles.
+
+- **System-Wide App Search & Top Half-Ring (`src/shell/AppIndex.cpp`, `src/shared/SearchMatch.h`, `src/shell/RingOverlay.cpp`):**
+  - Asynchronous Start Menu (`.lnk`) and `shell:AppsFolder` application indexer (`AppIndex`) with word-boundary and subsequence fuzzy ranking (`ScoreSearchCandidate`).
+  - Dedicated floating search pill above the ring with magnifying-glass icon (`#515151` border).
+  - Typing highlights matching pinned or open apps directly on the main ring (including pinned apps that are not currently running) and renders a curved top half-ring (`m_appSearchHits`, up to 6 system apps) to launch unpinned installed apps immediately.
+
+- **Redesigned 5-Page Settings Suite with Persistent 1:1 GPU Preview (`src/tools/SettingsDialog.cpp`):**
+  - `1040x660` native dark-mode Win32 + Direct2D 1.1 (`ID2D1DeviceContext` + `IDXGISwapChain1`) Settings window with 5 navigation pages: **Appearance**, **Triggers & Input**, **Top Bar & Clock**, **Pins & Folders**, and **Advanced**.
+  - **True 1:1 Live GPU Preview** persisted across **Appearance**, **Pins & Folders**, and **Advanced**, running the exact same Direct2D effect graph (`BuildPreviewAcrylicEffectImage`), `ComputeRingMaterial`, `GenerateAcrylicNoiseBgra256` frosted texture, `RadialMath.h` slot layout, real extracted shell icons, and running-app indicators, with instant toggle between **Split Test** and **Live Desktop** backdrops.
+  - Offscreen `ID2D1DCRenderTarget` + DIB double-buffered panel rendering (`WM_PAINT` + `WM_PRINTCLIENT`) for zero-flicker dark UI rendering.
+
+- **Tray Menu & Tool Dialog Refinements (`src/host/WinRingsHost.cpp`, `src/tools/CompressTrimDlg.cpp`, `src/tools/RedactEditor.cpp`):**
+  - Both left-click and right-click on the promoted system tray icon now open the WinRings tray context menu.
+  - Dark DWM title bar and owner-drawn dark controls across the Compress/Trim and Redact tools.
+
+---
+
 ## [v1.0.0] - 2026-11-20
 
 ### Added
