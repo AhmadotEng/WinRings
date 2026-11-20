@@ -1,0 +1,22 @@
+# Build intermediates & local scratch
+build/obj/
+build/bin/
+build/gen/
+build/stage/
+build/tests/
+work/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.res
+*.dmp
+*.log
+*.old
+
+# OS / Editor metadata
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db

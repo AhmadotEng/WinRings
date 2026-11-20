@@ -1,0 +1,402 @@
+#include "SlotModel.h"
+
+#include <ShlObj.h>
+#include <Shellapi.h>
+#include <winhttp.h>
+#include <algorithm>
+#include <cwctype>
+#include <thread>
+#include <unordered_set>
+
+namespace winrings
+{
+    namespace
+    {
+        std::wstring InferLabel(SlotKind kind, const std::wstring& pathOrUrl)
+        {
+            if (kind == SlotKind::RecycleBin)
+                return L"Recycle Bin";
+            if (kind == SlotKind::Website)
+            {
+                URL_COMPONENTS uc{ sizeof(uc) };
+                wchar_t host[256]{};
+                uc.lpszHostName = host;
+                uc.dwHostNameLength = _countof(host);
+                if (WinHttpCrackUrl(pathOrUrl.c_str(), static_cast<DWORD>(pathOrUrl.size()), 0, &uc) && host[0])
+                    return host;
+                return pathOrUrl;
+            }
+            const size_t slash = pathOrUrl.find_last_of(L"\\/");
+            std::wstring name = (slash != std::wstring::npos) ? pathOrUrl.substr(slash + 1) : pathOrUrl;
+            if (name.empty())
+                return pathOrUrl;
+            const size_t dot = name.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot > 0 && kind != SlotKind::Folder)
+                name.resize(dot);
+            return name;
+        }
+
+        bool IsRecycleBinFull()
+        {
+            SHQUERYRBINFO info{ sizeof(info) };
+            if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &info)))
+                return info.i64NumItems > 0;
+            return false;
+        }
+
+        Microsoft::WRL::ComPtr<IWICBitmapSource> LoadImageFromFileWic(
+            IWICImagingFactory* wic, const std::wstring& path)
+        {
+            if (!wic || path.empty())
+                return nullptr;
+            Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+            if (FAILED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                WICDecodeMetadataCacheOnLoad, decoder.GetAddressOf())) || !decoder)
+                return nullptr;
+            Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+            if (FAILED(decoder->GetFrame(0, frame.GetAddressOf())) || !frame)
+                return nullptr;
+            Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+            if (FAILED(wic->CreateFormatConverter(converter.GetAddressOf())) || !converter)
+                return nullptr;
+            if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+                return nullptr;
+            return converter;
+        }
+
+        void PopulateFolderSubItems(RingSlot& folderSlot, const std::wstring& folderPath, int maxItems, WindowTracker& tracker)
+        {
+            struct DirEntry
+            {
+                std::wstring name;
+                std::wstring fullPath;
+                bool isDir = false;
+                ULONGLONG writeTime = 0;
+            };
+
+            std::vector<DirEntry> entries;
+            const std::wstring pattern = folderPath + L"\\*";
+            WIN32_FIND_DATAW fd{};
+            HANDLE find = FindFirstFileW(pattern.c_str(), &fd);
+            if (find == INVALID_HANDLE_VALUE)
+                return;
+
+            do
+            {
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                    continue;
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0 &&
+                    (fd.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0)
+                    continue;
+                ULARGE_INTEGER ft{};
+                ft.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+                ft.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+                DirEntry e;
+                e.name = fd.cFileName;
+                e.fullPath = folderPath + L"\\" + fd.cFileName;
+                e.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                e.writeTime = ft.QuadPart;
+                entries.push_back(std::move(e));
+            } while (FindNextFileW(find, &fd));
+            FindClose(find);
+
+            std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {
+                return a.writeTime > b.writeTime;
+            });
+
+            const int limit = std::clamp(maxItems, 1, 9);
+            for (int i = 0; i < static_cast<int>(entries.size()) && i < limit; ++i)
+            {
+                RingSlot sub;
+                sub.id = L"file-" + std::to_wstring(i);
+                sub.kind = entries[i].isDir ? SlotKind::Folder : SlotKind::File;
+                sub.label = entries[i].name;
+                sub.pathOrUrl = entries[i].fullPath;
+                sub.iconBitmap = tracker.GetShellIconBitmap(entries[i].fullPath);
+                sub.isPinned = false;
+                folderSlot.subItems.push_back(std::move(sub));
+            }
+        }
+
+        RingSlot CreateSlotFromConfig(
+            const PinnedSlotConfig& cfg,
+            const std::vector<AppWindowGroup>& running,
+            std::unordered_set<std::wstring>& consumedKeys,
+            WindowTracker& tracker,
+            IWICImagingFactory* wicFactory)
+        {
+            const std::wstring expanded = SlotModel::ExpandEnv(cfg.pathOrUrl);
+            RingSlot slot;
+            slot.id = cfg.id;
+            slot.kind = cfg.kind;
+            slot.label = cfg.label.empty() ? InferLabel(cfg.kind, expanded) : cfg.label;
+            slot.pathOrUrl = expanded;
+            slot.isPinned = true;
+            slot.maxFolderItems = std::clamp(cfg.maxFolderItems, 1, 9);
+
+            if (cfg.kind == SlotKind::App)
+            {
+                const std::wstring key = WindowTracker::NormalizeAppKey(expanded, cfg.label);
+                bool matched = false;
+                for (const auto& grp : running)
+                {
+                    if (grp.normalizedKey == key)
+                    {
+                        slot.windows = grp.windows;
+                        slot.iconBitmap = grp.iconBitmap ? grp.iconBitmap : tracker.GetShellIconBitmap(expanded);
+                        consumedKeys.insert(key);
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched)
+                    slot.iconBitmap = tracker.GetShellIconBitmap(expanded);
+            }
+            else if (cfg.kind == SlotKind::File || cfg.kind == SlotKind::Folder || cfg.kind == SlotKind::Script)
+            {
+                slot.iconBitmap = tracker.GetShellIconBitmap(expanded);
+                if (cfg.kind == SlotKind::Folder)
+                    PopulateFolderSubItems(slot, expanded, slot.maxFolderItems, tracker);
+            }
+            else if (cfg.kind == SlotKind::Website)
+            {
+                if (!cfg.iconCacheFile.empty())
+                {
+                    const std::wstring fullIcon = (cfg.iconCacheFile.find(L':') != std::wstring::npos)
+                        ? cfg.iconCacheFile
+                        : (SwitcherConfig::AppDataDirectory() + L"\\" + cfg.iconCacheFile);
+                    slot.iconBitmap = LoadImageFromFileWic(wicFactory, fullIcon);
+                }
+            }
+            else if (cfg.kind == SlotKind::RecycleBin)
+            {
+                slot.iconBitmap = tracker.GetStockIconBitmap(IsRecycleBinFull() ? SIID_RECYCLERFULL : SIID_RECYCLER);
+            }
+            else if (cfg.kind == SlotKind::Collection)
+            {
+                slot.iconBitmap = tracker.GetStockIconBitmap(SIID_FOLDER);
+                for (const auto& child : cfg.items)
+                    slot.subItems.push_back(CreateSlotFromConfig(child, running, consumedKeys, tracker, wicFactory));
+            }
+            return slot;
+        }
+    } // namespace
+
+    std::wstring SlotModel::ExpandEnv(const std::wstring& input)
+    {
+        if (input.empty())
+            return {};
+        const DWORD needed = ExpandEnvironmentStringsW(input.c_str(), nullptr, 0);
+        if (!needed)
+            return input;
+        std::wstring out(static_cast<size_t>(needed), L'\0');
+        const DWORD actual = ExpandEnvironmentStringsW(input.c_str(), out.data(), needed);
+        if (!actual)
+            return input;
+        if (!out.empty() && out.back() == L'\0')
+            out.pop_back();
+        return out;
+    }
+
+    std::vector<RingSlot> SlotModel::BuildRingSlots(
+        HWND ignoreHwnd,
+        const SwitcherConfig& config,
+        WindowTracker& tracker,
+        IWICImagingFactory* wicFactory)
+    {
+        const auto running = tracker.EnumerateGroupedWindows(ignoreHwnd);
+        std::vector<RingSlot> slots;
+        std::unordered_set<std::wstring> consumedKeys;
+
+        for (const auto& pinned : config.pinnedSlots)
+        {
+            if (static_cast<int>(slots.size()) >= config.maxSlots)
+                break;
+            slots.push_back(CreateSlotFromConfig(pinned, running, consumedKeys, tracker, wicFactory));
+        }
+
+        if (config.includeUnpinnedRunningApps)
+        {
+            for (const auto& grp : running)
+            {
+                if (static_cast<int>(slots.size()) >= config.maxSlots)
+                    break;
+                if (consumedKeys.count(grp.normalizedKey))
+                    continue;
+                RingSlot s;
+                s.id = L"run-" + grp.normalizedKey;
+                s.kind = SlotKind::App;
+                s.label = grp.processName;
+                s.pathOrUrl = grp.exePath;
+                s.iconBitmap = grp.iconBitmap;
+                s.isPinned = false;
+                s.windows = grp.windows;
+                slots.push_back(std::move(s));
+            }
+        }
+
+        return slots;
+    }
+
+    void SlotModel::LaunchPathOrUrl(const std::wstring& pathOrUrl, const std::wstring& arguments)
+    {
+        if (pathOrUrl.empty())
+            return;
+        SHELLEXECUTEINFOW sei{ sizeof(sei) };
+        sei.fMask = SEE_MASK_FLAG_NO_UI;
+        sei.lpVerb = L"open";
+        sei.lpFile = pathOrUrl.c_str();
+        sei.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
+    }
+
+    void SlotModel::RevealInExplorer(const std::wstring& path)
+    {
+        if (path.empty())
+            return;
+        const std::wstring params = L"/select,\"" + path + L"\"";
+        ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+    }
+
+    bool SlotModel::SendToRecycleBin(const std::vector<std::wstring>& paths)
+    {
+        if (paths.empty())
+            return false;
+        std::wstring doubleNull;
+        for (const auto& p : paths)
+        {
+            if (!p.empty())
+            {
+                doubleNull += p;
+                doubleNull.push_back(L'\0');
+            }
+        }
+        if (doubleNull.empty())
+            return false;
+        doubleNull.push_back(L'\0');
+
+        SHFILEOPSTRUCTW op{};
+        op.wFunc = FO_DELETE;
+        op.pFrom = doubleNull.c_str();
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+        return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+    }
+
+    bool SlotModel::EmptyRecycleBin(HWND ownerHwnd)
+    {
+        return SUCCEEDED(SHEmptyRecycleBinW(ownerHwnd, nullptr,
+            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND));
+    }
+
+    void SlotModel::FetchFaviconAsync(
+        const std::wstring& url,
+        std::function<void(std::wstring relativeIconPath)> onCompleted)
+    {
+        std::thread([url, cb = std::move(onCompleted)]() {
+            URL_COMPONENTS uc{ sizeof(uc) };
+            wchar_t scheme[32]{};
+            wchar_t host[256]{};
+            uc.lpszScheme = scheme;
+            uc.dwSchemeLength = _countof(scheme);
+            uc.lpszHostName = host;
+            uc.dwHostNameLength = _countof(host);
+            if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &uc) || !host[0])
+            {
+                if (cb) cb(L"");
+                return;
+            }
+
+            std::wstring safeHost;
+            for (wchar_t c : std::wstring(host))
+            {
+                if (std::iswalnum(c) || c == L'-' || c == L'.')
+                    safeHost.push_back(c);
+            }
+            if (safeHost.empty())
+            {
+                if (cb) cb(L"");
+                return;
+            }
+
+            const std::wstring appDir = SwitcherConfig::AppDataDirectory();
+            const std::wstring iconsDir = appDir + L"\\icons";
+            SHCreateDirectoryExW(nullptr, iconsDir.c_str(), nullptr);
+            const std::wstring relPath = L"icons\\" + safeHost + L".ico";
+            const std::wstring fullPath = appDir + L"\\" + relPath;
+            if (GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                if (cb) cb(relPath);
+                return;
+            }
+
+            std::wstring resultPath;
+            HINTERNET session = WinHttpOpen(L"WinRings/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+            if (session)
+            {
+                WinHttpSetTimeouts(session, 4000, 4000, 4000, 4000);
+                const INTERNET_PORT port = uc.nPort ? uc.nPort : (uc.nScheme == INTERNET_SCHEME_HTTPS ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT);
+                HINTERNET conn = WinHttpConnect(session, host, port, 0);
+                if (conn)
+                {
+                    const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+                    HINTERNET req = WinHttpOpenRequest(conn, L"GET", L"/favicon.ico", nullptr,
+                        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+                    if (req)
+                    {
+                        DWORD disableCookies = WINHTTP_DISABLE_COOKIES;
+                        WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &disableCookies, sizeof(disableCookies));
+                        if (WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) &&
+                            WinHttpReceiveResponse(req, nullptr))
+                        {
+                            DWORD statusCode = 0;
+                            DWORD statusSize = sizeof(statusCode);
+                            WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+                            if (statusCode == 200)
+                            {
+                                std::string data;
+                                DWORD avail = 0;
+                                while (WinHttpQueryDataAvailable(req, &avail) && avail > 0 && data.size() < 512 * 1024)
+                                {
+                                    const size_t offset = data.size();
+                                    data.resize(offset + avail);
+                                    DWORD read = 0;
+                                    if (!WinHttpReadData(req, data.data() + offset, avail, &read) || read == 0)
+                                    {
+                                        data.resize(offset);
+                                        break;
+                                    }
+                                    data.resize(offset + read);
+                                }
+                                if (!data.empty())
+                                {
+                                    HANDLE file = CreateFileW(fullPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                    if (file != INVALID_HANDLE_VALUE)
+                                    {
+                                        DWORD written = 0;
+                                        if (WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr) &&
+                                            written == data.size())
+                                        {
+                                            resultPath = relPath;
+                                        }
+                                        CloseHandle(file);
+                                    }
+                                }
+                            }
+                        }
+                        WinHttpCloseHandle(req);
+                    }
+                    WinHttpCloseHandle(conn);
+                }
+                WinHttpCloseHandle(session);
+            }
+
+            if (cb)
+                cb(std::move(resultPath));
+        }).detach();
+    }
+} // namespace winrings

@@ -1,0 +1,542 @@
+#include <Windows.h>
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <string>
+
+#include "../src/shared/ClockFormat.h"
+#include "../src/shared/CrashGuard.h"
+#include "../src/shared/DropNaming.h"
+#include "../src/shared/RadialMath.h"
+#include "../src/shared/WinRingsConfig.h"
+
+using namespace winrings;
+
+static int g_failures = 0;
+
+#define CHECK(cond)                                                                      \
+    do                                                                                   \
+    {                                                                                    \
+        if (!(cond))                                                                     \
+        {                                                                                \
+            std::printf("FAIL [%s:%d]: %s\n", __FILE__, __LINE__, #cond);                \
+            ++g_failures;                                                                \
+        }                                                                                \
+    } while (0)
+
+static void TestRadialMath()
+{
+    CHECK(CalculateSectorIndex(10.0, -10.0, 6, 18.0) == -1);
+    CHECK(CalculateSectorIndex(0.0, -24.0, 8, 18.0) == 0);
+    CHECK(CalculateSectorIndex(0.0, -80.0, 4, 18.0) == 0);
+    CHECK(CalculateSectorIndex(80.0, 0.0, 4, 18.0) == 1);
+    CHECK(CalculateSectorIndex(0.0, 80.0, 4, 18.0) == 2);
+    CHECK(CalculateSectorIndex(-80.0, 0.0, 4, 18.0) == 3);
+    CHECK(CalculateSectorIndex(100.0, 0.0, 0, 18.0) == -1);
+
+    CHECK(StepIndex(-1, 6, -120) == 0);
+    CHECK(StepIndex(-1, 6, 120) == 5);
+    CHECK(StepIndex(5, 6, -120) == 0);
+    CHECK(StepIndex(0, 6, 120) == 5);
+
+    const auto arc = GetOuterArcCenters(340.0, 340.0, -kPi / 2.0, 200.0, 14);
+    CHECK(arc.size() == 9);
+    CHECK(std::abs(arc[0].x - 340.0) < 0.1);
+    CHECK(std::abs(arc[0].y - 140.0) < 0.1);
+
+    const PointD origin{ 340.0, 260.0 };
+    const RectD submenu{ 280.0, 80.0, 120.0, 80.0 };
+    CHECK(IsPointInHoverCorridor({ 340.0, 200.0 }, origin, submenu));
+    CHECK(IsPointInHoverCorridor({ 320.0, 110.0 }, origin, submenu));
+    CHECK(!IsPointInHoverCorridor({ 340.0, 360.0 }, origin, submenu));
+    // Must not overshoot far past the submenu target rect.
+    CHECK(!IsPointInHoverCorridor({ 340.0, 10.0 }, origin, submenu));
+    // When origin is inside the expanded rect, must not project a 360-degree wraparound cone outside it.
+    CHECK(!IsPointInHoverCorridor({ 340.0, 220.0 }, { 340.0, 120.0 }, submenu));
+    CHECK(!IsPointInHoverCorridor({ 100.0, 120.0 }, { 340.0, 120.0 }, submenu));
+
+    const RectD workArea{ 0.0, 30.0, 1920.0, 1050.0 };
+    const auto clamped = ClampRingCenter(20.0, 10.0, 160.0, workArea);
+    CHECK(std::abs(clamped.x - 160.0) < 0.01);
+    CHECK(std::abs(clamped.y - 190.0) < 0.01);
+
+    CHECK(std::abs(EaseOutCubic(0.0) - 0.0) < 1e-6);
+    CHECK(std::abs(EaseOutCubic(1.0) - 1.0) < 1e-6);
+    CHECK(EaseOutCubic(0.5) > 0.5);
+}
+
+static bool RectIntersectsCircle(RectD r, PointD c, double radius) noexcept
+{
+    const double closestX = std::clamp(c.x, r.left, r.Right());
+    const double closestY = std::clamp(c.y, r.top, r.Bottom());
+    return std::hypot(closestX - c.x, closestY - c.y) < radius;
+}
+
+static void TestDownloadsAndSubmenuHoverTransitions()
+{
+    constexpr double kOverlay = 680.0;
+    constexpr PointD kCenter{ 340.0, 340.0 };
+    constexpr double kDeadzone = 18.0;
+    constexpr double kRingR = 112.0;
+    constexpr double kIconSize = 42.0;
+    const double mainRingOuterR = MainRingOuterRadius(kRingR, kIconSize);
+    CHECK(std::abs(mainRingOuterR - 150.0) < 0.01);
+
+    // 1. Exact Bug 1 reproduction: Downloads (Folder, slot 1) with 8 items in 3-, 6-, 8-, and 14-slot rings.
+    const int ringSizes[] = { 3, 6, 8, 14 };
+    for (int slotCount : ringSizes)
+    {
+        const int downloadsSlot = 1;
+        const double dlAngle = GetSlotAngle(downloadsSlot, slotCount);
+        const auto cards = ComputeFolderSubmenuRects(kCenter.x, kCenter.y, dlAngle, kRingR, kIconSize, 8);
+        CHECK(cards.size() == 8);
+        const RectD bounds = ComputeUnionBounds(cards);
+
+        // No submenu card may intersect the main ring.
+        for (const auto& card : cards)
+            CHECK(!RectIntersectsCircle(card, kCenter, mainRingOuterR));
+
+        // Test transitions starting both from barely outside deadzone (r=22) AND from the Downloads icon (r=112).
+        const PointD origins[2] = {
+            { kCenter.x + 22.0 * std::cos(dlAngle), kCenter.y + 22.0 * std::sin(dlAngle) },
+            GetSlotCenter(kCenter.x, kCenter.y, kRingR, downloadsSlot, slotCount)
+        };
+
+        for (const PointD& origin : origins)
+        {
+            // Moving to EVERY other main-ring slot icon (and inner/outer ring points in its sector) MUST switch immediately.
+            for (int other = 0; other < slotCount; ++other)
+            {
+                if (other == downloadsSlot)
+                    continue;
+                const double otherAngle = GetSlotAngle(other, slotCount);
+                const PointD testPts[3] = {
+                    GetSlotCenter(kCenter.x, kCenter.y, kRingR, other, slotCount),
+                    { kCenter.x + 55.0 * std::cos(otherAngle), kCenter.y + 55.0 * std::sin(otherAngle) },
+                    { kCenter.x + (mainRingOuterR - 2.0) * std::cos(otherAngle), kCenter.y + (mainRingOuterR - 2.0) * std::sin(otherAngle) }
+                };
+                for (const PointD& pt : testPts)
+                {
+                    const auto res = ResolveRingHover(
+                        pt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                        downloadsSlot, downloadsSlot, origin, cards, bounds, false);
+                    CHECK(res.selectedSlot == other);
+                    CHECK(res.selectedSubIndex == -1);
+                    CHECK(!res.keepExistingSubmenu);
+                }
+            }
+
+            // Moving into center deadzone MUST immediately deselect and collapse submenu.
+            const PointD deadzonePts[4] = {
+                kCenter,
+                { kCenter.x + 10.0, kCenter.y - 6.0 },
+                { kCenter.x, kCenter.y - kDeadzone },
+                { kCenter.x + (kDeadzone - 0.5) * std::cos(dlAngle), kCenter.y + (kDeadzone - 0.5) * std::sin(dlAngle) }
+            };
+            for (const PointD& pt : deadzonePts)
+            {
+                const auto res = ResolveRingHover(
+                    pt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                    downloadsSlot, downloadsSlot, origin, cards, bounds, false);
+                CHECK(res.selectedSlot == -1);
+                CHECK(res.selectedSubIndex == -1);
+                CHECK(!res.keepExistingSubmenu);
+            }
+        }
+
+        // Gliding straight out from Downloads icon across the gap into card 0 keeps submenu open and selects card 0.
+        const PointD dlCenter = GetSlotCenter(kCenter.x, kCenter.y, kRingR, downloadsSlot, slotCount);
+        const PointD bridgePt{ kCenter.x + 165.0 * std::cos(dlAngle), kCenter.y + 165.0 * std::sin(dlAngle) };
+        const auto bridgeRes = ResolveRingHover(
+            bridgePt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
+        CHECK(bridgeRes.selectedSlot == downloadsSlot);
+        CHECK(bridgeRes.selectedSubIndex == -1);
+        CHECK(bridgeRes.keepExistingSubmenu);
+
+        // Hovering every submenu card selects that exact card; gliding in inter-card gaps keeps submenu open.
+        for (size_t i = 0; i < cards.size(); ++i)
+        {
+            const PointD cardCenter{ cards[i].left + cards[i].width * 0.5, cards[i].top + cards[i].height * 0.5 };
+            const auto cardRes = ResolveRingHover(
+                cardCenter, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
+            CHECK(cardRes.selectedSlot == downloadsSlot);
+            CHECK(cardRes.selectedSubIndex == static_cast<int>(i));
+            CHECK(cardRes.keepExistingSubmenu);
+        }
+
+        // Gap between offset +2 (index 3) and offset +3 (index 5) along outer radius 208 keeps Downloads open.
+        const double gapAngle = dlAngle + 2.5 * 0.30;
+        const PointD gapPt{ kCenter.x + 208.0 * std::cos(gapAngle), kCenter.y + 208.0 * std::sin(gapAngle) };
+        const auto gapRes = ResolveRingHover(
+            gapPt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
+        CHECK(gapRes.selectedSlot == downloadsSlot);
+        CHECK(gapRes.selectedSubIndex == -1);
+        CHECK(gapRes.keepExistingSubmenu);
+
+        // Moving back onto Downloads icon clears stale sub-selection while keeping Downloads open & updating origin.
+        const auto backRes = ResolveRingHover(
+            dlCenter, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, origins[0], cards, bounds, false);
+        CHECK(backRes.selectedSlot == downloadsSlot);
+        CHECK(backRes.selectedSubIndex == -1);
+        CHECK(backRes.keepExistingSubmenu);
+        CHECK(backRes.updateCorridorOrigin);
+
+        // Moving far past the opposite side of the outer arc switches to the opposite slot.
+        const int oppositeSlot = (downloadsSlot + slotCount / 2) % slotCount;
+        const double oppAngle = GetSlotAngle(oppositeSlot, slotCount);
+        const PointD farOpp{ kCenter.x + 230.0 * std::cos(oppAngle), kCenter.y + 230.0 * std::sin(oppAngle) };
+        const auto oppRes = ResolveRingHover(
+            farOpp, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            downloadsSlot, downloadsSlot, dlCenter, cards, bounds, false);
+        CHECK(oppRes.selectedSlot == oppositeSlot);
+        CHECK(!oppRes.keepExistingSubmenu);
+    }
+
+    // 2. Multi-window App in OuterArc mode across thumbnailScale = 0.5, 1.0, 1.5 (up to 9 windows).
+    const double scales[] = { 0.5, 1.0, 1.5 };
+    for (double scale : scales)
+    {
+        const int slotCount = 8;
+        const int appSlot = 2;
+        const double baseAngle = GetSlotAngle(appSlot, slotCount);
+        const auto cards = ComputeWindowOuterArcRects(kCenter.x, kCenter.y, baseAngle, kRingR, kIconSize, scale, 9);
+        CHECK(cards.size() == 9);
+        const RectD bounds = ComputeUnionBounds(cards);
+        const PointD origin = GetSlotCenter(kCenter.x, kCenter.y, kRingR, appSlot, slotCount);
+
+        for (const auto& card : cards)
+            CHECK(!RectIntersectsCircle(card, kCenter, mainRingOuterR));
+
+        // Direct hit on outermost window card (index 8) works.
+        const PointD lastCard{ cards[8].left + cards[8].width * 0.5, cards[8].top + cards[8].height * 0.5 };
+        const auto subRes = ResolveRingHover(
+            lastCard, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+            appSlot, appSlot, origin, cards, bounds, false);
+        CHECK(subRes.selectedSlot == appSlot);
+        CHECK(subRes.selectedSubIndex == 8);
+        CHECK(subRes.keepExistingSubmenu);
+
+        // Moving onto ANY other main-ring slot icon immediately switches away.
+        for (int other = 0; other < slotCount; ++other)
+        {
+            if (other == appSlot)
+                continue;
+            const PointD otherPt = GetSlotCenter(kCenter.x, kCenter.y, kRingR, other, slotCount);
+            const auto res = ResolveRingHover(
+                otherPt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                appSlot, appSlot, origin, cards, bounds, false);
+            CHECK(res.selectedSlot == other);
+            CHECK(!res.keepExistingSubmenu);
+        }
+    }
+
+    // 3. Multi-window App in TitleColumn mode (1, 5, 9 windows) at all 8 compass slots.
+    const int counts[] = { 1, 5, 9 };
+    for (int count : counts)
+    {
+        const int slotCount = 8;
+        for (int appSlot = 0; appSlot < slotCount; ++appSlot)
+        {
+            const double baseAngle = GetSlotAngle(appSlot, slotCount);
+            const auto cards = ComputeTitleColumnRects(kCenter.x, kCenter.y, kOverlay, baseAngle, kRingR, kIconSize, count);
+            CHECK(static_cast<int>(cards.size()) == count);
+            const RectD bounds = ComputeUnionBounds(cards);
+            const PointD origin = GetSlotCenter(kCenter.x, kCenter.y, kRingR, appSlot, slotCount);
+
+            // TitleColumn cards must stay inside overlay and must NEVER overlap the main ring.
+            for (const auto& card : cards)
+            {
+                CHECK(card.left >= 0.0 && card.Right() <= kOverlay);
+                CHECK(card.top >= 0.0 && card.Bottom() <= kOverlay);
+                CHECK(!RectIntersectsCircle(card, kCenter, mainRingOuterR));
+            }
+
+            // Hovering every row selects that exact row.
+            for (int r = 0; r < count; ++r)
+            {
+                const PointD rowCenter{ cards[static_cast<size_t>(r)].left + cards[static_cast<size_t>(r)].width * 0.5,
+                                        cards[static_cast<size_t>(r)].top + cards[static_cast<size_t>(r)].height * 0.5 };
+                const auto rowRes = ResolveRingHover(
+                    rowCenter, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                    appSlot, appSlot, origin, cards, bounds, true);
+                CHECK(rowRes.selectedSlot == appSlot);
+                CHECK(rowRes.selectedSubIndex == r);
+                CHECK(rowRes.keepExistingSubmenu);
+            }
+
+            // Gliding strictly outside the main ring straight from origin toward TitleColumn center keeps it open.
+            const PointD colCenter{ bounds.left + bounds.width * 0.5, bounds.top + bounds.height * 0.5 };
+            const double dirX = colCenter.x - origin.x;
+            const double dirY = colCenter.y - origin.y;
+            const double dirLen = std::hypot(dirX, dirY);
+            if (dirLen > 1.0)
+            {
+                // Step along segment origin -> colCenter until outside mainRingOuterR + 4 and before entering bounds.
+                for (double t = 0.1; t < 0.95; t += 0.05)
+                {
+                    const PointD p{ origin.x + t * dirX, origin.y + t * dirY };
+                    if (std::hypot(p.x - kCenter.x, p.y - kCenter.y) > mainRingOuterR + 4.0 && !bounds.Contains(p))
+                    {
+                        const auto corrRes = ResolveRingHover(
+                            p, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                            appSlot, appSlot, origin, cards, bounds, true);
+                        CHECK(corrRes.selectedSlot == appSlot);
+                        CHECK(corrRes.keepExistingSubmenu);
+                        break;
+                    }
+                }
+            }
+
+            // Moving to ANY other main-ring slot icon or center deadzone immediately collapses TitleColumn.
+            for (int other = 0; other < slotCount; ++other)
+            {
+                if (other == appSlot)
+                    continue;
+                const PointD otherPt = GetSlotCenter(kCenter.x, kCenter.y, kRingR, other, slotCount);
+                const auto res = ResolveRingHover(
+                    otherPt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                    appSlot, appSlot, origin, cards, bounds, true);
+                CHECK(res.selectedSlot == other);
+                CHECK(!res.keepExistingSubmenu);
+            }
+
+            const auto deadRes = ResolveRingHover(
+                kCenter, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                appSlot, appSlot, origin, cards, bounds, true);
+            CHECK(deadRes.selectedSlot == -1);
+            CHECK(!deadRes.keepExistingSubmenu);
+        }
+    }
+
+    // 4. End-to-end multi-step trajectory simulating RingOverlay::UpdatePointer with Downloads + other icons.
+    {
+        constexpr int slotCount = 6;
+        constexpr int downloadsSlot = 1; // -30 deg (2 o'clock)
+        constexpr int explorerSlot = 0;  // -90 deg (12 o'clock)
+        constexpr int recycleSlot = 2;   // +30 deg (4 o'clock)
+        constexpr int collectionSlot = 4; // +150 deg (8 o'clock)
+
+        int selectedSlot = -1;
+        int expandedSlot = -1;
+        int selectedSub = -1;
+        PointD corridorOrigin = kCenter;
+        std::vector<RectD> subCards;
+        RectD subBounds{};
+
+        auto stepPointer = [&](PointD pt) {
+            const auto res = ResolveRingHover(
+                pt, kCenter, slotCount, kDeadzone, kRingR, kIconSize,
+                selectedSlot, expandedSlot, corridorOrigin, subCards, subBounds, false);
+            if (res.selectedSlot != selectedSlot)
+            {
+                selectedSlot = res.selectedSlot;
+                selectedSub = -1;
+                if (selectedSlot == downloadsSlot || selectedSlot == collectionSlot)
+                {
+                    expandedSlot = selectedSlot;
+                    corridorOrigin = pt;
+                    const int itemCnt = (selectedSlot == downloadsSlot) ? 8 : 5;
+                    subCards = ComputeFolderSubmenuRects(
+                        kCenter.x, kCenter.y, GetSlotAngle(selectedSlot, slotCount), kRingR, kIconSize, itemCnt);
+                    subBounds = ComputeUnionBounds(subCards);
+                }
+                else
+                {
+                    expandedSlot = -1;
+                    subCards.clear();
+                    subBounds = {};
+                }
+            }
+            else
+            {
+                if (!res.keepExistingSubmenu)
+                {
+                    expandedSlot = -1;
+                    subCards.clear();
+                    subBounds = {};
+                }
+                if (res.updateCorridorOrigin)
+                    corridorOrigin = pt;
+                selectedSub = res.selectedSubIndex;
+            }
+        };
+
+        // Enter Downloads just outside deadzone -> Downloads expands!
+        const double dlAngle = GetSlotAngle(downloadsSlot, slotCount);
+        stepPointer({ kCenter.x + 24.0 * std::cos(dlAngle), kCenter.y + 24.0 * std::sin(dlAngle) });
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == -1);
+        // Verify that the naive AABB of Downloads' 8-item outer arc actually encloses Explorer and center!
+        CHECK(subBounds.Contains(GetSlotCenter(kCenter.x, kCenter.y, kRingR, explorerSlot, slotCount)) ||
+              IsPointInHoverCorridor(GetSlotCenter(kCenter.x, kCenter.y, kRingR, explorerSlot, slotCount), corridorOrigin, subBounds));
+
+        // Move out to Downloads icon -> origin updates, still expanded.
+        const PointD dlIcon = GetSlotCenter(kCenter.x, kCenter.y, kRingR, downloadsSlot, slotCount);
+        stepPointer(dlIcon);
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot);
+        CHECK(std::abs(corridorOrigin.x - dlIcon.x) < 0.01 && std::abs(corridorOrigin.y - dlIcon.y) < 0.01);
+
+        // Move into Downloads outer-arc card #0, then glide via gap to card #5.
+        const PointD card0{ subCards[0].left + subCards[0].width * 0.5, subCards[0].top + subCards[0].height * 0.5 };
+        stepPointer(card0);
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == 0);
+
+        const PointD card5{ subCards[5].left + subCards[5].width * 0.5, subCards[5].top + subCards[5].height * 0.5 };
+        stepPointer({ kCenter.x + 208.0 * std::cos(dlAngle + 2.5 * 0.30), kCenter.y + 208.0 * std::sin(dlAngle + 2.5 * 0.30) });
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == -1);
+        stepPointer(card5);
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && selectedSub == 5);
+
+        // Now move directly onto Recycle Bin icon -> MUST immediately leave Downloads and select Recycle Bin!
+        stepPointer(GetSlotCenter(kCenter.x, kCenter.y, kRingR, recycleSlot, slotCount));
+        CHECK(selectedSlot == recycleSlot && expandedSlot == -1 && selectedSub == -1);
+
+        // Re-hover Downloads, then move directly onto Explorer icon -> MUST immediately switch to Explorer!
+        stepPointer(dlIcon);
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot);
+        stepPointer(GetSlotCenter(kCenter.x, kCenter.y, kRingR, explorerSlot, slotCount));
+        CHECK(selectedSlot == explorerSlot && expandedSlot == -1 && selectedSub == -1);
+
+        // Hover Collection (slot 4), expand it, then move directly onto Downloads -> switches cleanly!
+        stepPointer(GetSlotCenter(kCenter.x, kCenter.y, kRingR, collectionSlot, slotCount));
+        CHECK(selectedSlot == collectionSlot && expandedSlot == collectionSlot && subCards.size() == 5);
+        stepPointer(dlIcon);
+        CHECK(selectedSlot == downloadsSlot && expandedSlot == downloadsSlot && subCards.size() == 8);
+
+        // Move back to center deadzone -> clears everything!
+        stepPointer(kCenter);
+        CHECK(selectedSlot == -1 && expandedSlot == -1 && selectedSub == -1);
+    }
+}
+
+static void TestClockFormat()
+{
+    SYSTEMTIME st{};
+    st.wYear = 2026;
+    st.wMonth = 11;
+    st.wDay = 20; // Friday
+    st.wHour = 16;
+    st.wMinute = 2;
+    st.wSecond = 9;
+
+    const std::wstring compact = FormatClock(st, L"ddd d MMM  h:mm tt", ClockCasing::CompactLower);
+    CHECK(compact == L"Fri 20 Nov  4:02 pm");
+
+    const std::wstring exact = FormatClock(st, L"ddd d MMM  h:mm tt", ClockCasing::Exact);
+    CHECK(exact == L"Fri 20 Nov  4:02 PM");
+
+    const std::wstring upper = FormatClock(st, L"dddd dd MMMM HH:mm:ss", ClockCasing::Upper);
+    CHECK(upper == L"FRIDAY 20 NOVEMBER 16:02:09");
+
+    SYSTEMTIME midnight{};
+    midnight.wYear = 2026;
+    midnight.wMonth = 1;
+    midnight.wDay = 5; // Monday
+    midnight.wHour = 0;
+    midnight.wMinute = 7;
+    CHECK(FormatClock(midnight, L"ddd d MMM  h:mm tt", ClockCasing::CompactLower) == L"Mon 5 Jan  12:07 am");
+
+    SYSTEMTIME noon{};
+    noon.wYear = 2026;
+    noon.wMonth = 6;
+    noon.wDay = 15;
+    noon.wHour = 12;
+    noon.wMinute = 0;
+    CHECK(FormatClock(noon, L"h:mm tt", ClockCasing::CompactLower) == L"12:00 pm");
+}
+
+static void TestCrashGuard()
+{
+    CrashGuardState s{};
+    s = AdvanceCrashGuard(s, true, 1000);
+    CHECK(!s.disabled && s.abnormalExitCount == 1);
+    s = AdvanceCrashGuard(s, true, 2000);
+    CHECK(!s.disabled && s.abnormalExitCount == 2);
+    s = AdvanceCrashGuard(s, false, 2001);
+    CHECK(!s.disabled && s.abnormalExitCount == 2);
+    s = AdvanceCrashGuard(s, true, 1000 + kCrashLoopWindow100ns + 5000);
+    CHECK(!s.disabled && s.abnormalExitCount == 1);
+    s = AdvanceCrashGuard(s, true, 1000 + kCrashLoopWindow100ns + 6000);
+    s = AdvanceCrashGuard(s, true, 1000 + kCrashLoopWindow100ns + 7000);
+    CHECK(s.disabled && s.abnormalExitCount == 3);
+}
+
+static void TestConfigRoundTripAndDropNaming()
+{
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(_countof(tempDir), tempDir);
+    const std::wstring testDir = std::wstring(tempDir) + L"WinRingsTest_" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(testDir.c_str(), nullptr);
+
+    const std::wstring cfgPath = testDir + L"\\config.json";
+    SwitcherConfig orig = SwitcherConfig::CreateDefault();
+    orig.mouseTrigger = MouseTriggerButton::Middle;
+    orig.topBarHeightDip = 32;
+    orig.topBarClockFormat = L"ddd d MMM  h:mm tt";
+    orig.topBarClockCasing = ClockCasing::CompactLower;
+    orig.theme = RingTheme::Aura;
+    orig.accentColor = L"#FF5522";
+    orig.menuKeyEnabled = true;
+    orig.interceptWinTab = true;
+    orig.pinnedSlots.push_back(PinnedSlotConfig{
+        L"col-1", SlotKind::Collection, L"Dev", L"", L"", 8,
+        { PinnedSlotConfig{ L"site-1", SlotKind::Website, L"Example", L"https://example.com", L"icons\\example.ico", 8, {} } }
+    });
+
+    CHECK(orig.SaveToFile(cfgPath));
+    SwitcherConfig loaded;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, loaded));
+    CHECK(loaded.mouseTrigger == MouseTriggerButton::Middle);
+    CHECK(loaded.topBarHeightDip == 32);
+    CHECK(loaded.topBarClockFormat == L"ddd d MMM  h:mm tt");
+    CHECK(loaded.topBarClockCasing == ClockCasing::CompactLower);
+    CHECK(loaded.theme == RingTheme::Aura);
+    CHECK(loaded.accentColor == L"#FF5522");
+    CHECK(loaded.menuKeyEnabled == true);
+    CHECK(loaded.interceptWinTab == true);
+    CHECK(loaded.pinnedSlots.size() == 4);
+    CHECK(loaded.pinnedSlots[3].kind == SlotKind::Collection);
+    CHECK(loaded.pinnedSlots[3].items.size() == 1);
+    CHECK(loaded.pinnedSlots[3].items[0].pathOrUrl == L"https://example.com");
+
+    SwitcherConfig bad;
+    CHECK(!SwitcherConfig::ParseJsonUtf8("{ not valid json", bad));
+
+    const std::wstring srcFile = testDir + L"\\photo.png";
+    HANDLE h = CreateFileW(srcFile.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+
+    const std::wstring out1 = BuildNonDestructiveOutputPath(srcFile, L"converted", L".jpg");
+    CHECK(out1 == testDir + L"\\photo (converted).jpg");
+    h = CreateFileW(out1.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+
+    const std::wstring out2 = BuildNonDestructiveOutputPath(srcFile, L"converted", L".jpg");
+    CHECK(out2 == testDir + L"\\photo (converted 2).jpg");
+
+    DeleteFileW(out1.c_str());
+    DeleteFileW(srcFile.c_str());
+    DeleteFileW(cfgPath.c_str());
+    RemoveDirectoryW(testDir.c_str());
+}
+
+int wmain()
+{
+    TestRadialMath();
+    TestDownloadsAndSubmenuHoverTransitions();
+    TestClockFormat();
+    TestCrashGuard();
+    TestConfigRoundTripAndDropNaming();
+
+    if (g_failures == 0)
+    {
+        std::printf("WinRingsTests: ALL PASSED\n");
+        return 0;
+    }
+    std::printf("WinRingsTests: %d FAILURE(S)\n", g_failures);
+    return 1;
+}
