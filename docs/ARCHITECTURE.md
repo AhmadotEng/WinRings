@@ -37,14 +37,15 @@ WinRingsSetup.exe (Single-File Installer)
 
 ## 3. Radial Switcher, Live Acrylic Backdrop & DWM Thumbnail Engine
 
-### 3.1 Dual-Swap-Chain Direct2D + DirectComposition + `Windows::UI::Composition` Ring (`RingOverlay.cpp`, `AcrylicBackdrop.cpp`, `RingThemeEngine.h`)
-- Creates a top-level `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP` overlay window (`WinRings.Overlay.v1`).
-- **Live Wallpaper-Reactive Frosted Acrylic (`AcrylicBackdrop.cpp`):**
-  - Enables `DWMWA_USE_HOSTBACKDROPBRUSH` (`17`), `DwmExtendFrameIntoClientArea({-1, -1, -1, -1})`, and `WCA_FORCE_ACTIVEWINDOW_APPEARANCE` (`15`).
-  - Builds a strict-tree `Windows::UI::Composition` effect factory (`GaussianBlur (30 px) -> Saturation -> Blend(D2D1_BLEND_MODE_LUMINOSITY) -> Composite(SOURCE_OVER)`) reading `Compositor::CreateHostBackdropBrush()`.
-  - Clips the desktop acrylic backdrop through `m_acrylicSwapChain` to the true ring annulus (`holeRadius = 60 DIP`, `outerRadius = 148 DIP`, `ringRadius = 112 DIP`), curved outer submenu arcs (`ComputeIconArcLayout`), window preview cards, drop pills, search pill, and center label pill, while rendering crisp icons, typography, tiled `256x256` frosted noise grain (`m_noiseBrush`), and razor-thin `<= 0.85 DIP` hairline rims on `m_fgSwapChain`.
-- **Single Shared Material Engine (`RingThemeEngine.h`):**
-  - `ComputeRingMaterial` and `GenerateAcrylicNoiseBgra256` drive `WinRingsShell.dll`, `WinRingsTools.exe` (`SettingsDialog.cpp` 1:1 GPU preview), and `WinRingsTests.exe` from one source of truth across the 3 visual presets (`A4S`, `DarkWood`, `Blue`), `glassLevel (0–100)`, and `lightDarkMode (0–100)`.
+### 3.1 Native A4S WCA Acrylic Backdrop + Antialiased Direct2D Foreground (`RingOverlay.cpp`, `AcrylicBackdrop.cpp`, `RingThemeEngine.h`)
+- **Primary Native A4S Backdrop (`WinRings.WcaBackdrop.v1`):**
+  - Synchronized non-layered `WS_POPUP` (`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) locked immediately behind `WinRings.Overlay.v1`.
+  - Applies the exact A4S-Menu DWM backdrop pipeline (`DWMWA_USE_IMMERSIVE_DARK_MODE = 20`, `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND`, `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`, `WCA_FORCE_ACTIVEWINDOW_APPEARANCE = 15`, `WCA_ACCENT_POLICY = 19` with `state = 4`, `flags = 0x13`, `gradientColor = 0x80202020` at default `A4S`, and `BeginBufferedPaint(..., BPPF_ERASE)` transparent 32-bit surface).
+  - Hash-gated `SetWindowRgn` clips the native WCA acrylic to the hollow ring annulus (`CombineRgn` `RGN_DIFF`), curved outer arcs (`CreatePolygonRgn`), window cards, and search/center pills, inset by `1.0 px` on every perimeter.
+- **Antialiased Direct2D + DirectComposition Foreground (`WinRings.Overlay.v1`):**
+  - Renders per-pixel antialiased `2.0 DIP` perimeter edge-bridging, top-lit 3D outer glass bezel gradients, optically recessed 3D inner bevel gradients, soft elevation shadow lips, icons, running dots, hover reveal, and typography via lightweight `IDCompositionDevice` + `IDXGISwapChain1` without painting synthetic noise over the native WCA texture.
+- **Automatic Composition Fallback (`AcrylicBackdrop.cpp`) & Shared Material Engine (`RingThemeEngine.h`):**
+  - If `SetWindowCompositionAttribute` is unavailable, `AcrylicBackdrop.cpp` falls back to `Windows::UI::Composition` `HostBackdropBrush` (`CLSID_D2D1Flood` straight RGBA + `D2D1_BLEND_MODE_COLOR` luminosity pass + `SOURCE_OVER` tint) calibrated within `±1/255` of both live A4S-Menu and Direct2D 1.1 (`SettingsDialog.cpp` 1:1 preview).
 - Honors `disableOpeningAnimation` (frame-0 instant open) as well as Windows `SPI_GETCLIENTAREAANIMATION`.
 
 ### 3.2 Pooled Non-Layered DWM Thumbnail Windows (`DwmThumbPool.cpp`)

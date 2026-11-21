@@ -1,6 +1,8 @@
 #include "RingOverlay.h"
 
 #include <ShellScalingApi.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
@@ -23,6 +25,30 @@ namespace winrings
         constexpr double kIdleSlotScale = 0.90;
         constexpr double kSelectedSlotScale = 1.20;
         constexpr double kSearchMouseUnlockDip = 4.0;
+        constexpr wchar_t kWcaBackdropClass[] = L"WinRings.WcaBackdrop.v1";
+
+        struct WcaAccentPolicy
+        {
+            int state;
+            int flags;
+            DWORD gradientColor;
+            int animationId;
+        };
+
+        struct WcaAttrData
+        {
+            DWORD attrib;
+            PVOID pvData;
+            SIZE_T cbData;
+        };
+
+        using SetWindowCompositionAttributeFn = BOOL (WINAPI*)(HWND, WcaAttrData*);
+
+        inline uint64_t HashMix(uint64_t h, uint64_t v) noexcept
+        {
+            h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            return h;
+        }
 
         const RectD kConvertBadgeDip{ 256.0, 684.0, 118.0, 42.0 };
         const RectD kActionsBadgeDip{ 386.0, 684.0, 118.0, 42.0 };
@@ -81,6 +107,8 @@ namespace winrings
         if (!m_hwnd)
             return false;
 
+        m_wcaBackdropActive = CreateWcaBackdropWindow();
+
         if (!CreateGraphicsDevices())
             return false;
 
@@ -113,11 +141,375 @@ namespace winrings
         }
         m_thumbPool.Shutdown();
         ReleaseGraphicsDevices();
+        DestroyWcaBackdropWindow();
         if (m_hwnd)
         {
             DestroyWindow(m_hwnd);
             m_hwnd = nullptr;
         }
+    }
+
+    LRESULT CALLBACK RingOverlay::WcaBackdropWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        switch (msg)
+        {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_PAINT:
+        {
+            // Identical transparent-DIB paint pass to A4S-Menu (MenuPaint.cpp:3650-3655):
+            // BPPF_ERASE clears the 32-bit surface to alpha=0 so native WCA ACCENT_ENABLE_ACRYLICBLURBEHIND
+            // composites directly with zero GDI fill interference.
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            BP_PAINTPARAMS pp{ sizeof(pp), BPPF_ERASE, nullptr, nullptr };
+            HDC memDc = nullptr;
+            if (HPAINTBUFFER hbp = BeginBufferedPaint(hdc, &ps.rcPaint, BPBF_TOPDOWNDIB, &pp, &memDc))
+                EndBufferedPaint(hbp, TRUE);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        default:
+            break;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    bool RingOverlay::CreateWcaBackdropWindow()
+    {
+        DestroyWcaBackdropWindow();
+
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto setComp = user32
+            ? reinterpret_cast<SetWindowCompositionAttributeFn>(GetProcAddress(user32, "SetWindowCompositionAttribute"))
+            : nullptr;
+        if (!setComp)
+            return false;
+
+        if (!m_bufferedPaintInit)
+        {
+            BufferedPaintInit();
+            m_bufferedPaintInit = true;
+        }
+
+        if (!m_wcaClassRegistered)
+        {
+            WNDCLASSEXW wc{ sizeof(wc) };
+            wc.lpfnWndProc = WcaBackdropWndProc;
+            wc.hInstance = m_instance;
+            wc.hbrBackground = nullptr;
+            wc.lpszClassName = kWcaBackdropClass;
+            if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+                return false;
+            m_wcaClassRegistered = true;
+        }
+
+        m_wcaBackdropHwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            kWcaBackdropClass,
+            L"",
+            WS_POPUP,
+            0, 0, 760, 760,
+            nullptr, nullptr, m_instance, nullptr);
+        if (!m_wcaBackdropHwnd)
+            return false;
+
+        // Suppress square DWM rounding and square outer border on the 760x760 bounding HWND;
+        // SetWindowRgn clips WCA acrylic precisely to the ring annulus, outer arc, and pills.
+        const int noRound = 1; // DWMWCP_DONOTROUND
+        DwmSetWindowAttribute(m_wcaBackdropHwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &noRound, sizeof(noRound));
+        const DWORD noBorder = 0xFFFFFFFEu; // DWMWA_COLOR_NONE
+        DwmSetWindowAttribute(m_wcaBackdropHwnd, 34 /* DWMWA_BORDER_COLOR */, &noBorder, sizeof(noBorder));
+
+        BOOL forceActive = TRUE;
+        WcaAttrData activeData{ 15 /* WCA_FORCE_ACTIVEWINDOW_APPEARANCE */, &forceActive, sizeof(forceActive) };
+        setComp(m_wcaBackdropHwnd, &activeData);
+
+        m_lastWcaState = -1;
+        m_lastWcaGradColor = 0;
+        m_lastWcaDark = -1;
+        m_lastWcaRegionHash = 0;
+        UpdateWcaMaterial(BuildThemeColors());
+        return (m_lastWcaState >= 0);
+    }
+
+    void RingOverlay::DestroyWcaBackdropWindow()
+    {
+        if (m_wcaBackdropHwnd)
+        {
+            DestroyWindow(m_wcaBackdropHwnd);
+            m_wcaBackdropHwnd = nullptr;
+        }
+        m_wcaBackdropActive = false;
+        m_lastWcaState = -1;
+        m_lastWcaGradColor = 0;
+        m_lastWcaDark = -1;
+        m_lastWcaRegionHash = 0;
+        if (m_bufferedPaintInit)
+        {
+            BufferedPaintUnInit();
+            m_bufferedPaintInit = false;
+        }
+    }
+
+    void RingOverlay::UpdateWcaMaterial(const ThemeColors& tc)
+    {
+        if (!m_wcaBackdropHwnd)
+            return;
+
+        const BYTE r = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(tc.tintR * 255.0f)), 0, 255));
+        const BYTE g = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(tc.tintG * 255.0f)), 0, 255));
+        const BYTE b = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(tc.tintB * 255.0f)), 0, 255));
+        const BYTE a = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(tc.tintAlpha * 255.0f)), 2, 255));
+        const DWORD gradColor = (static_cast<DWORD>(a) << 24) | RGB(r, g, b);
+        const int state = (tc.blurSigma > 1.0f) ? 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */ : 2 /* ACCENT_ENABLE_TRANSPARENTGRADIENT */;
+        const int darkVal = tc.isLightText ? 1 : 0;
+
+        if (state == m_lastWcaState && gradColor == m_lastWcaGradColor && darkVal == m_lastWcaDark)
+            return;
+
+        const BOOL dark = darkVal ? TRUE : FALSE;
+        DwmSetWindowAttribute(m_wcaBackdropHwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto setComp = user32
+            ? reinterpret_cast<SetWindowCompositionAttributeFn>(GetProcAddress(user32, "SetWindowCompositionAttribute"))
+            : nullptr;
+        if (!setComp)
+            return;
+
+        BOOL forceActive = TRUE;
+        WcaAttrData activeData{ 15 /* WCA_FORCE_ACTIVEWINDOW_APPEARANCE */, &forceActive, sizeof(forceActive) };
+        setComp(m_wcaBackdropHwnd, &activeData);
+
+        // Exact same WCA_ACCENT_POLICY invocation as A4S-Menu (MenuContainer.cpp:126-129):
+        // At default A4S (glassLevel=50, lightDarkMode=0): state=4, flags=0x13, gradientColor=0x80202020.
+        WcaAccentPolicy policy{ state, 0x13, gradColor, 0 };
+        WcaAttrData accentData{ 19 /* WCA_ACCENT_POLICY */, &policy, sizeof(policy) };
+        if (setComp(m_wcaBackdropHwnd, &accentData))
+        {
+            m_lastWcaState = state;
+            m_lastWcaGradColor = gradColor;
+            m_lastWcaDark = darkVal;
+            InvalidateRect(m_wcaBackdropHwnd, nullptr, FALSE);
+        }
+    }
+
+    void RingOverlay::UpdateWcaRegion(float dpiScale, float openScale, float outerR, float holeR,
+        bool hasCurvedArc, bool hasQuery, const D2D1_ROUNDED_RECT& searchPill,
+        bool hasSummary, const D2D1_ROUNDED_RECT& centerPill)
+    {
+        if (!m_wcaBackdropHwnd)
+            return;
+
+        auto dipToPx = [&](double v) -> double {
+            return (kCenterDip + (v - kCenterDip) * static_cast<double>(openScale)) * static_cast<double>(dpiScale);
+        };
+        const double cxPx = kCenterDip * static_cast<double>(dpiScale);
+        const double cyPx = kCenterDip * static_cast<double>(dpiScale);
+        const double scalePx = static_cast<double>(dpiScale) * static_cast<double>(openScale);
+
+        // Hash every region parameter at 0.25 px precision to avoid redundant SetWindowRgn calls.
+        uint64_t h = 0x517CC1B727220A95ULL;
+        h = HashMix(h, static_cast<uint64_t>(std::llround(dpiScale * 100.0f)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(openScale * 1000.0f)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(outerR * 4.0f)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(holeR * 4.0f)));
+        h = HashMix(h, hasCurvedArc ? 1ULL : 0ULL);
+        if (hasCurvedArc)
+        {
+            h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuArcLayout.arcRadius * 4.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuArcLayout.startAngleRad * 1000.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuArcLayout.endAngleRad * 1000.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuArcLayout.trackWidthDip * 4.0)));
+        }
+        if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty())
+        {
+            for (const auto& card : m_submenuCards)
+            {
+                if (!card.window)
+                    continue;
+                h = HashMix(h, static_cast<uint64_t>(std::llround(card.boundsDip.left * 2.0)));
+                h = HashMix(h, static_cast<uint64_t>(std::llround(card.boundsDip.top * 2.0)));
+                h = HashMix(h, static_cast<uint64_t>(std::llround(card.boundsDip.width * 2.0)));
+                h = HashMix(h, static_cast<uint64_t>(std::llround(card.boundsDip.height * 2.0)));
+                h = HashMix(h, static_cast<uint64_t>(std::llround(card.currentScale * 100.0)));
+            }
+        }
+        h = HashMix(h, m_dragActive ? 1ULL : 0ULL);
+        h = HashMix(h, hasQuery ? 1ULL : 0ULL);
+        if (hasQuery)
+        {
+            h = HashMix(h, static_cast<uint64_t>(std::llround(searchPill.rect.left * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(searchPill.rect.top * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(searchPill.rect.right * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(searchPill.rect.bottom * 2.0f)));
+        }
+        h = HashMix(h, hasSummary ? 1ULL : 0ULL);
+        if (hasSummary)
+        {
+            h = HashMix(h, static_cast<uint64_t>(std::llround(centerPill.rect.left * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(centerPill.rect.top * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(centerPill.rect.right * 2.0f)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(centerPill.rect.bottom * 2.0f)));
+        }
+
+        if (h == m_lastWcaRegionHash)
+            return;
+
+        // Inset region by 1.0 px on every perimeter so the 1-bit HRGN staircase sits strictly inside
+        // the silky antialiased Direct2D edge-bridge & 3D glass bezel drawn on m_hwnd.
+        const double outerPx = (std::max)(2.0, static_cast<double>(outerR) * scalePx - 1.0);
+        const double holePx = (std::max)(1.0, static_cast<double>(holeR) * scalePx + 1.0);
+
+        HRGN combined = CreateEllipticRgn(
+            static_cast<int>(std::lround(cxPx - outerPx)),
+            static_cast<int>(std::lround(cyPx - outerPx)),
+            static_cast<int>(std::lround(cxPx + outerPx)) + 1,
+            static_cast<int>(std::lround(cyPx + outerPx)) + 1);
+        if (!combined)
+            return;
+
+        if (holePx < outerPx - 1.0)
+        {
+            HRGN inner = CreateEllipticRgn(
+                static_cast<int>(std::lround(cxPx - holePx)),
+                static_cast<int>(std::lround(cyPx - holePx)),
+                static_cast<int>(std::lround(cxPx + holePx)) + 1,
+                static_cast<int>(std::lround(cyPx + holePx)) + 1);
+            if (inner)
+            {
+                CombineRgn(combined, combined, inner, RGN_DIFF);
+                DeleteObject(inner);
+            }
+        }
+
+        auto addRoundRect = [&](double lDip, double tDip, double rDip, double bDip, double radDip) {
+            const int l = static_cast<int>(std::lround(dipToPx(lDip) + 1.0));
+            const int t = static_cast<int>(std::lround(dipToPx(tDip) + 1.0));
+            const int r = static_cast<int>(std::lround(dipToPx(rDip) - 1.0)) + 1;
+            const int b = static_cast<int>(std::lround(dipToPx(bDip) - 1.0)) + 1;
+            const int d = (std::max)(2, static_cast<int>(std::lround(radDip * 2.0 * scalePx)));
+            if (r > l && b > t)
+            {
+                if (HRGN rr = CreateRoundRectRgn(l, t, r, b, d, d))
+                {
+                    CombineRgn(combined, combined, rr, RGN_OR);
+                    DeleteObject(rr);
+                }
+            }
+        };
+
+        if (hasCurvedArc && m_submenuArcLayout.trackWidthDip > 2.0)
+        {
+            const double arcR = m_submenuArcLayout.arcRadius * scalePx;
+            const double halfW = (std::max)(1.0, m_submenuArcLayout.trackWidthDip * 0.5 * scalePx - 1.0);
+            const double a0 = m_submenuArcLayout.startAngleRad;
+            const double a1 = m_submenuArcLayout.endAngleRad;
+            const double acx = cxPx;
+            const double acy = cyPx;
+
+            if (std::abs(a1 - a0) < 0.01)
+            {
+                const double ex = acx + arcR * std::cos(a0);
+                const double ey = acy + arcR * std::sin(a0);
+                if (HRGN cap = CreateEllipticRgn(
+                    static_cast<int>(std::lround(ex - halfW)),
+                    static_cast<int>(std::lround(ey - halfW)),
+                    static_cast<int>(std::lround(ex + halfW)) + 1,
+                    static_cast<int>(std::lround(ey + halfW)) + 1))
+                {
+                    CombineRgn(combined, combined, cap, RGN_OR);
+                    DeleteObject(cap);
+                }
+            }
+            else
+            {
+                constexpr int kArcSteps = 44;
+                constexpr int kCapSteps = 14;
+                std::vector<POINT> pts;
+                pts.reserve(static_cast<size_t>((kArcSteps + 1) * 2 + (kCapSteps + 1) * 2));
+                const double rOut = arcR + halfW;
+                const double rIn = (std::max)(1.0, arcR - halfW);
+                const double dir = (a1 >= a0) ? 1.0 : -1.0;
+
+                for (int i = 0; i <= kArcSteps; ++i)
+                {
+                    const double ang = a0 + (a1 - a0) * (static_cast<double>(i) / kArcSteps);
+                    pts.push_back(POINT{
+                        static_cast<LONG>(std::lround(acx + rOut * std::cos(ang))),
+                        static_cast<LONG>(std::lround(acy + rOut * std::sin(ang)))
+                    });
+                }
+                const double c1x = acx + arcR * std::cos(a1);
+                const double c1y = acy + arcR * std::sin(a1);
+                for (int i = 1; i < kCapSteps; ++i)
+                {
+                    const double ang = a1 + dir * kPi * (static_cast<double>(i) / kCapSteps);
+                    pts.push_back(POINT{
+                        static_cast<LONG>(std::lround(c1x + halfW * std::cos(ang))),
+                        static_cast<LONG>(std::lround(c1y + halfW * std::sin(ang)))
+                    });
+                }
+                for (int i = kArcSteps; i >= 0; --i)
+                {
+                    const double ang = a0 + (a1 - a0) * (static_cast<double>(i) / kArcSteps);
+                    pts.push_back(POINT{
+                        static_cast<LONG>(std::lround(acx + rIn * std::cos(ang))),
+                        static_cast<LONG>(std::lround(acy + rIn * std::sin(ang)))
+                    });
+                }
+                const double c0x = acx + arcR * std::cos(a0);
+                const double c0y = acy + arcR * std::sin(a0);
+                for (int i = 1; i < kCapSteps; ++i)
+                {
+                    const double ang = a0 + dir * kPi + dir * kPi * (static_cast<double>(i) / kCapSteps);
+                    pts.push_back(POINT{
+                        static_cast<LONG>(std::lround(c0x + halfW * std::cos(ang))),
+                        static_cast<LONG>(std::lround(c0y + halfW * std::sin(ang)))
+                    });
+                }
+                if (HRGN arcRgn = CreatePolygonRgn(pts.data(), static_cast<int>(pts.size()), WINDING))
+                {
+                    CombineRgn(combined, combined, arcRgn, RGN_OR);
+                    DeleteObject(arcRgn);
+                }
+            }
+        }
+
+        if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty())
+        {
+            for (const auto& card : m_submenuCards)
+            {
+                if (!card.window)
+                    continue;
+                const double cx = card.boundsDip.left + card.boundsDip.width * 0.5;
+                const double cy = card.boundsDip.top + card.boundsDip.height * 0.5;
+                const double hw = card.boundsDip.width * 0.5 * card.currentScale;
+                const double hh = card.boundsDip.height * 0.5 * card.currentScale;
+                addRoundRect(cx - hw, cy - hh, cx + hw, cy + hh, 8.0);
+            }
+        }
+
+        if (m_dragActive)
+        {
+            addRoundRect(kConvertBadgeDip.left, kConvertBadgeDip.top, kConvertBadgeDip.Right(), kConvertBadgeDip.Bottom(), 21.0);
+            addRoundRect(kActionsBadgeDip.left, kActionsBadgeDip.top, kActionsBadgeDip.Right(), kActionsBadgeDip.Bottom(), 21.0);
+        }
+
+        if (hasQuery)
+            addRoundRect(searchPill.rect.left, searchPill.rect.top, searchPill.rect.right, searchPill.rect.bottom, searchPill.radiusX);
+        if (hasSummary)
+            addRoundRect(centerPill.rect.left, centerPill.rect.top, centerPill.rect.right, centerPill.rect.bottom, centerPill.radiusX);
+
+        if (SetWindowRgn(m_wcaBackdropHwnd, combined, TRUE))
+            m_lastWcaRegionHash = h;
+        else
+            DeleteObject(combined);
     }
 
     void RingOverlay::SetConfig(const SwitcherConfig& config)
@@ -217,10 +609,11 @@ namespace winrings
 
         EnsureNoiseBrush();
 
-        if (!m_acrylicBackdrop.Initialize(m_hwnd, m_swapChain.Get(), m_maskSwapChain.Get(),
+        if (m_wcaBackdropActive || !m_acrylicBackdrop.Initialize(m_hwnd, m_swapChain.Get(), m_maskSwapChain.Get(),
             m_swapWidthPx, m_swapHeightPx))
         {
-            // Fallback to IDCompositionTarget if Windows.UI.Composition desktop target is unavailable.
+            // When native WCA ACCENT_ENABLE_ACRYLICBLURBEHIND is active on m_wcaBackdropHwnd (exact A4S-Menu path),
+            // m_hwnd renders crisp antialiased foreground chrome & icons over it via lightweight IDCompositionTarget.
             if (FAILED(DCompositionCreateDevice(m_dxgiDevice.Get(), IID_PPV_ARGS(m_dcompDevice.ReleaseAndGetAddressOf()))))
                 return false;
             if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, m_dcompTarget.ReleaseAndGetAddressOf())))
@@ -421,6 +814,8 @@ namespace winrings
 
         EnsureSwapChainSize(physSize, physSize);
         SetWindowPos(m_hwnd, HWND_TOPMOST, leftPx, topPx, physSize, physSize, SWP_NOACTIVATE);
+        if (m_wcaBackdropHwnd)
+            SetWindowPos(m_wcaBackdropHwnd, m_hwnd, leftPx, topPx, physSize, physSize, SWP_NOACTIVATE);
     }
 
     bool RingOverlay::IsPointInActiveBounds(POINT screenPt) const noexcept
@@ -470,7 +865,9 @@ namespace winrings
 
     AcrylicMaterialParams RingOverlay::BuildAcrylicMaterial() const noexcept
     {
-        return AcrylicParamsFromMaterial(ComputeRingMaterial(m_config, m_dpiScale));
+        AcrylicMaterialParams p = AcrylicParamsFromMaterial(ComputeRingMaterial(m_config, m_dpiScale));
+        p.blurSigma *= static_cast<float>((std::max)(1.0, m_dpiScale));
+        return p;
     }
 
     RingOverlay::ThemeColors RingOverlay::BuildThemeColors() const noexcept
@@ -528,7 +925,14 @@ namespace winrings
         }
 
         Render();
+        if (m_wcaBackdropHwnd && m_wcaBackdropActive)
+        {
+            ShowWindow(m_wcaBackdropHwnd, SW_SHOWNOACTIVATE);
+            UpdateWindow(m_wcaBackdropHwnd);
+        }
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+        if (m_wcaBackdropHwnd && m_wcaBackdropActive)
+            SetWindowPos(m_wcaBackdropHwnd, m_hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     void RingOverlay::HandleEscapeKey()
@@ -564,6 +968,8 @@ namespace winrings
             m_animTimerRunning = false;
         }
         ClearSubmenu();
+        if (m_wcaBackdropHwnd && IsWindow(m_wcaBackdropHwnd))
+            ShowWindow(m_wcaBackdropHwnd, SW_HIDE);
         if (m_hwnd && IsWindow(m_hwnd))
             ShowWindow(m_hwnd, SW_HIDE);
         if (m_callbacks.onOverlayClosed)
@@ -1364,7 +1770,7 @@ namespace winrings
         return nullptr;
     }
 
-    void RingOverlay::DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill)
+    void RingOverlay::DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill, bool paintNoise)
     {
         if (!m_d2dContext || !arcGeo || arc.rects.empty())
             return;
@@ -1380,10 +1786,21 @@ namespace winrings
             if (auto b = mkBrush(tc.ringFill))
                 m_d2dContext->FillGeometry(arcGeo, b.Get());
         }
-        if (m_noiseBrush && tc.noiseOpacity > 0.002f)
+        if (paintNoise && m_noiseBrush && tc.noiseOpacity > 0.002f)
             m_d2dContext->FillGeometry(arcGeo, m_noiseBrush.Get());
+        if (m_wcaBackdropActive)
+        {
+            const D2D1_COLOR_F edgeBridge = (m_config.theme == RingTheme::Blue)
+                ? D2D1::ColorF(tc.tintR, tc.tintG, tc.tintB, 0.88f)
+                : (tc.isLightText ? D2D1::ColorF(34.0f / 255.0f, 34.0f / 255.0f, 36.0f / 255.0f, 0.88f)
+                                  : D2D1::ColorF(236.0f / 255.0f, 236.0f / 255.0f, 240.0f / 255.0f, 0.88f));
+            if (auto eb = mkBrush(edgeBridge))
+                m_d2dContext->DrawGeometry(arcGeo, eb.Get(), 2.2f);
+        }
         if (auto b = mkBrush(tc.ringStroke))
-            m_d2dContext->DrawGeometry(arcGeo, b.Get(), tc.hairlineWidth);
+        {
+            m_d2dContext->DrawGeometry(arcGeo, b.Get(), 0.95f);
+        }
     }
 
     void RingOverlay::Render()
@@ -1391,11 +1808,15 @@ namespace winrings
         if (!m_d2dContext || !m_targetBitmap || !m_swapChain)
             return;
 
-        const bool acrylicActive = m_acrylicBackdrop.IsActive() && m_maskSwapChain && m_maskTargetBitmap;
-        if (acrylicActive)
+        const ThemeColors tc = BuildThemeColors();
+        const bool wcaActive = m_wcaBackdropActive && m_wcaBackdropHwnd != nullptr;
+        const bool acrylicActive = !wcaActive && m_acrylicBackdrop.IsActive() && m_maskSwapChain && m_maskTargetBitmap;
+        const bool hasLiveBackdrop = wcaActive || acrylicActive;
+        if (wcaActive)
+            UpdateWcaMaterial(tc);
+        else if (acrylicActive)
             m_acrylicBackdrop.UpdateMaterial(BuildAcrylicMaterial());
 
-        const ThemeColors tc = BuildThemeColors();
         const RingGeometry geom = ActiveGeometry();
         const float dpiScale = static_cast<float>(m_dpiScale);
         const double easedOpen = EaseOutCubic(m_openProgress);
@@ -1462,8 +1883,14 @@ namespace winrings
                 14.0f, 14.0f);
         }
 
-        // Pass A (when live acrylic is active): render antialiased alpha mask for glass regions only.
-        if (acrylicActive)
+        // Pass A (when native WCA backdrop is active): sync exact SetWindowRgn matching A4S-Menu's native acrylic.
+        if (wcaActive)
+        {
+            UpdateWcaRegion(dpiScale, openScale, outerR, holeR, curvedArcGeo != nullptr,
+                hasQuery, searchPill, hasSummary, centerPill);
+        }
+        // Pass A-fallback (when Windows.UI.Composition acrylic is active): render antialiased alpha mask.
+        else if (acrylicActive)
         {
             m_d2dContext->SetTarget(m_maskTargetBitmap.Get());
             m_d2dContext->BeginDraw();
@@ -1525,9 +1952,11 @@ namespace winrings
             m_maskSwapChain->Present(0, 0);
         }
 
-        // Pass B: Foreground content (frosted micro-grain, hairline rims, icons, running dots, hover reveal, magnifier, typography).
+        // Pass B: Foreground content (hairline rims, icons, running dots, hover reveal, magnifier, typography).
+        // When native WCA ACCENT_ENABLE_ACRYLICBLURBEHIND is active, Windows 11 DWM supplies the exact native
+        // A4S-Menu texture and glow directly — no synthetic noise overlay is painted on top.
         EnsureNoiseBrush();
-        const bool useNoise = (m_noiseBrush != nullptr && tc.noiseOpacity > 0.002f);
+        const bool useNoise = (!wcaActive && m_noiseBrush != nullptr && tc.noiseOpacity > 0.002f);
         if (useNoise)
             m_noiseBrush->SetOpacity(tc.noiseOpacity);
 
@@ -1542,24 +1971,94 @@ namespace winrings
             return b;
         };
 
-        // 1. Single Hollow Annulus Backdrop (in fallback mode) + frosted micro-grain texture + razor-thin A4S hairline rims
-        if (!acrylicActive && annulusGeo)
+        // 1. Single Hollow Annulus Backdrop (in fallback mode) + silky antialiased 3D glass rims
+        if (!hasLiveBackdrop && annulusGeo)
         {
             if (auto b = mkBrush(tc.ringFill))
                 m_d2dContext->FillGeometry(annulusGeo.Get(), b.Get());
         }
         if (useNoise && annulusGeo)
             m_d2dContext->FillGeometry(annulusGeo.Get(), m_noiseBrush.Get());
-        if (auto b = mkBrush(tc.ringStroke))
+
+        // When native WCA acrylic is clipped by a 1-bit HRGN inset by 1.0 px, paint a silky antialiased
+        // 2.0 DIP edge bridge right over the 1px transition band (leaving the approved WCA interior 100% untouched),
+        // then layer a subtle top-lit 3D glass bezel + soft drop-edge shadow lip on outer and inner circles.
+        if (wcaActive)
         {
-            const float halfSw = tc.ringStrokeWidth * 0.5f;
-            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - halfSw, outerR - halfSw), b.Get(), tc.ringStrokeWidth);
+            const D2D1_COLOR_F bridgeCol = (m_config.theme == RingTheme::Blue)
+                ? D2D1::ColorF(tc.tintR, tc.tintG, tc.tintB, 0.90f)
+                : (tc.isLightText ? D2D1::ColorF(34.0f / 255.0f, 34.0f / 255.0f, 36.0f / 255.0f, 0.90f)
+                                  : D2D1::ColorF(236.0f / 255.0f, 236.0f / 255.0f, 240.0f / 255.0f, 0.90f));
+            if (auto br = mkBrush(bridgeCol))
+            {
+                m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - 0.9f, outerR - 0.9f), br.Get(), 2.0f);
+                m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + 0.9f, holeR + 0.9f), br.Get(), 2.0f);
+            }
         }
-        if (auto b = mkBrush(tc.innerRimStroke))
+
+        // Subtle outer & inner soft shadow feather for smooth 3D elevation against any wallpaper
+        if (auto shBr = mkBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, tc.isLightText ? 0.30f : 0.14f)))
         {
-            const float innerSw = tc.ringStrokeWidth * 0.82f;
-            const float halfSw = innerSw * 0.5f;
-            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + halfSw, holeR + halfSw), b.Get(), innerSw);
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR + 0.65f, outerR + 0.65f), shBr.Get(), 1.3f);
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR - 0.55f, holeR - 0.55f), shBr.Get(), 1.1f);
+        }
+
+        auto makeRimGradient = [&](float yTop, float yBot, D2D1_COLOR_F cTop, D2D1_COLOR_F cMid, D2D1_COLOR_F cBot) {
+            Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> lgb;
+            D2D1_GRADIENT_STOP stops[3] = {
+                { 0.0f, cTop },
+                { 0.52f, cMid },
+                { 1.0f, cBot }
+            };
+            Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> gsc;
+            if (SUCCEEDED(m_d2dContext->CreateGradientStopCollection(stops, 3, gsc.GetAddressOf())))
+            {
+                m_d2dContext->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(centerPt.x, yTop), D2D1::Point2F(centerPt.x, yBot)),
+                    gsc.Get(), lgb.GetAddressOf());
+            }
+            return lgb;
+        };
+
+        const D2D1_COLOR_F outerTop = (m_config.theme == RingTheme::Blue)
+            ? D2D1::ColorF(132.0f / 255.0f, 198.0f / 255.0f, 1.0f, 0.62f)
+            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.25f)
+                              : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f));
+        const D2D1_COLOR_F outerMid = (m_config.theme == RingTheme::Blue)
+            ? tc.ringStroke
+            : (tc.isLightText ? D2D1::ColorF(118.0f / 255.0f, 118.0f / 255.0f, 124.0f / 255.0f, 0.42f)
+                              : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.55f));
+        const D2D1_COLOR_F outerBot = (m_config.theme == RingTheme::Blue)
+            ? D2D1::ColorF(52.0f / 255.0f, 120.0f / 255.0f, 230.0f / 255.0f, 0.34f)
+            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f)
+                              : D2D1::ColorF(120.0f / 255.0f, 126.0f / 255.0f, 138.0f / 255.0f, 0.42f));
+
+        if (auto outerGrad = makeRimGradient(centerPt.y - outerR, centerPt.y + outerR, outerTop, outerMid, outerBot))
+        {
+            constexpr float kOuterRimW = 1.05f;
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - kOuterRimW * 0.5f, outerR - kOuterRimW * 0.5f),
+                outerGrad.Get(), kOuterRimW);
+        }
+
+        // Optically recessed inner bevel (softer shadow at 12 o'clock, gentle catch-light at 6 o'clock)
+        const D2D1_COLOR_F innerTop = (m_config.theme == RingTheme::Blue)
+            ? D2D1::ColorF(48.0f / 255.0f, 110.0f / 255.0f, 210.0f / 255.0f, 0.28f)
+            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.07f)
+                              : D2D1::ColorF(110.0f / 255.0f, 116.0f / 255.0f, 126.0f / 255.0f, 0.34f));
+        const D2D1_COLOR_F innerMid = (m_config.theme == RingTheme::Blue)
+            ? tc.innerRimStroke
+            : (tc.isLightText ? D2D1::ColorF(108.0f / 255.0f, 108.0f / 255.0f, 114.0f / 255.0f, 0.32f)
+                              : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.45f));
+        const D2D1_COLOR_F innerBot = (m_config.theme == RingTheme::Blue)
+            ? D2D1::ColorF(126.0f / 255.0f, 190.0f / 255.0f, 1.0f, 0.48f)
+            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.20f)
+                              : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.72f));
+
+        if (auto innerGrad = makeRimGradient(centerPt.y - holeR, centerPt.y + holeR, innerTop, innerMid, innerBot))
+        {
+            constexpr float kInnerRimW = 0.95f;
+            m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + kInnerRimW * 0.5f, holeR + kInnerRimW * 0.5f),
+                innerGrad.Get(), kInnerRimW);
         }
 
         // 2. Slot icons, running dots, selection circle & count badge (ZERO blue cone wedge!)
@@ -1675,7 +2174,7 @@ namespace winrings
         if ((m_expandedSlotIndex >= 0 || m_searchArcActive) && !m_submenuCards.empty())
         {
             if (curvedArcGeo)
-                DrawCurvedArcTrack(curvedArcGeo.Get(), m_submenuArcLayout, tc, !acrylicActive);
+                DrawCurvedArcTrack(curvedArcGeo.Get(), m_submenuArcLayout, tc, !hasLiveBackdrop, useNoise);
 
             for (size_t i = 0; i < m_submenuCards.size(); ++i)
             {
@@ -1718,7 +2217,7 @@ namespace winrings
                 else if (card.window)
                 {
                     const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rect, 8.0f, 8.0f);
-                    if (!acrylicActive)
+                    if (!hasLiveBackdrop)
                     {
                         D2D1_COLOR_F fill = tc.centerFill;
                         if (card.window->isMinimized)
@@ -1729,7 +2228,7 @@ namespace winrings
                     if (useNoise)
                         m_d2dContext->FillRoundedRectangle(rr, m_noiseBrush.Get());
                     if (auto b = mkBrush(sel ? tc.sectorStroke : tc.centerBorder))
-                        m_d2dContext->DrawRoundedRectangle(rr, b.Get(), sel ? 1.5f : tc.hairlineWidth);
+                        m_d2dContext->DrawRoundedRectangle(rr, b.Get(), sel ? 1.5f : (wcaActive ? (std::max)(1.10f, tc.hairlineWidth) : tc.hairlineWidth));
 
                     if (m_smallFormat)
                     {
@@ -1755,14 +2254,14 @@ namespace winrings
                 const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
                     D2D1::RectF(static_cast<float>(r.left), static_cast<float>(r.top),
                         static_cast<float>(r.Right()), static_cast<float>(r.Bottom())), 21.0f, 21.0f);
-                if (!acrylicActive || hot)
+                if (!hasLiveBackdrop || hot)
                 {
                     D2D1_COLOR_F fill = hot ? tc.slotSelectedFill : tc.centerFill;
                     if (auto b = mkBrush(fill)) m_d2dContext->FillRoundedRectangle(rr, b.Get());
                 }
                 if (useNoise)
                     m_d2dContext->FillRoundedRectangle(rr, m_noiseBrush.Get());
-                if (auto b = mkBrush(tc.accent)) m_d2dContext->DrawRoundedRectangle(rr, b.Get(), hot ? 1.5f : tc.hairlineWidth);
+                if (auto b = mkBrush(tc.accent)) m_d2dContext->DrawRoundedRectangle(rr, b.Get(), hot ? 1.5f : (wcaActive ? (std::max)(1.10f, tc.hairlineWidth) : tc.hairlineWidth));
                 if (m_titleFormat)
                 {
                     if (auto wb = mkBrush(tc.textColor))
@@ -1776,7 +2275,7 @@ namespace winrings
         // 5. Center label / Search Stadium Pill (continuous acrylic interior + razor-thin hairline border)
         if (hasQuery)
         {
-            if (!acrylicActive)
+            if (!hasLiveBackdrop)
             {
                 if (auto b = mkBrush(tc.searchFill))
                     m_d2dContext->FillRoundedRectangle(searchPill, b.Get());
@@ -1784,7 +2283,7 @@ namespace winrings
             if (useNoise)
                 m_d2dContext->FillRoundedRectangle(searchPill, m_noiseBrush.Get());
             if (auto b = mkBrush(tc.searchBorder))
-                m_d2dContext->DrawRoundedRectangle(searchPill, b.Get(), tc.hairlineWidth);
+                m_d2dContext->DrawRoundedRectangle(searchPill, b.Get(), wcaActive ? (std::max)(1.10f, tc.hairlineWidth) : tc.hairlineWidth);
 
             // A4S-Menu monochrome #909090 vector magnifier on the left of the search pill
             if (auto mb = mkBrush(Argb(255, 144, 144, 144)))
@@ -1811,7 +2310,7 @@ namespace winrings
 
         if (hasSummary)
         {
-            if (!acrylicActive)
+            if (!hasLiveBackdrop)
             {
                 if (auto b = mkBrush(tc.centerFill))
                     m_d2dContext->FillRoundedRectangle(centerPill, b.Get());
@@ -1819,7 +2318,7 @@ namespace winrings
             if (useNoise)
                 m_d2dContext->FillRoundedRectangle(centerPill, m_noiseBrush.Get());
             if (auto b = mkBrush(tc.centerBorder))
-                m_d2dContext->DrawRoundedRectangle(centerPill, b.Get(), tc.hairlineWidth);
+                m_d2dContext->DrawRoundedRectangle(centerPill, b.Get(), wcaActive ? (std::max)(1.10f, tc.hairlineWidth) : tc.hairlineWidth);
 
             if (m_titleFormat)
             {

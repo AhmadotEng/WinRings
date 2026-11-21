@@ -627,8 +627,9 @@ static void TestThemeMaterialEngine()
     CHECK(std::abs(mA4s.tintR - (32.0f / 255.0f)) < 0.002f);
     CHECK(std::abs(mA4s.tintAlpha - (128.0f / 255.0f)) < 0.002f);
     CHECK(std::abs(mA4s.blurSigma - 30.0f) < 0.05f);
-    CHECK(mA4s.luminosityAlpha > 0.30f);
-    CHECK(mA4s.noiseOpacity > 0.03f);
+    CHECK(std::abs(mA4s.luminosityR - (38.0f / 255.0f)) < 0.002f);
+    CHECK(mA4s.luminosityAlpha >= 0.88f);
+    CHECK(mA4s.noiseOpacity > 0.008f && mA4s.noiseOpacity <= 0.016f);
     CHECK(mA4s.borderColorRef == RGB(62, 62, 62));
     CHECK(mA4s.ringStrokeWidth <= 0.85f);
     CHECK(mA4s.isLightText);

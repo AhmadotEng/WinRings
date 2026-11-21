@@ -2,6 +2,27 @@
 
 All notable changes to **WinRings** are documented in this file.
 
+## [v2.5.0] - 2026-11-21 (Release 2.5 — Approved A4S Look)
+
+### Visual & Material Architecture (Approved Default Look)
+
+- **Native Windows 11 WCA Acrylic Backdrop Matching A4S-Menu (`src/shell/RingOverlay.h`, `src/shell/RingOverlay.cpp`):**
+  - Added a dedicated synchronized backdrop window (`WinRings.WcaBackdrop.v1`) immediately behind `WinRings.Overlay.v1` calling the exact same Windows 11 DWM backdrop pipeline as **A4S-Menu**:
+    - `DwmSetWindowAttribute(20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */)`
+    - `SetWindowCompositionAttribute(15 /* WCA_FORCE_ACTIVEWINDOW_APPEARANCE */, TRUE)`
+    - `SetWindowCompositionAttribute(19 /* WCA_ACCENT_POLICY */, { state = 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */, flags = 0x13, gradientColor = 0x80202020 })` at default **A4S Menu** (`glassLevel = 50`, `lightDarkMode = 0`), dynamically tracking `Glass Level`, `Light / Dark Mode`, `Blue`, and `Dark Wood`.
+    - `BeginBufferedPaint(..., BPBF_TOPDOWNDIB, BPPF_ERASE)` transparent 32-bit surface so Windows 11 DWM renders its native acrylic blur, luminosity, glow, and micro-texture directly with zero synthetic noise painted over the live ring.
+  - Clipped `WinRings.WcaBackdrop.v1` via `SetWindowRgn` (`CombineRgn` `RGN_DIFF` hollow ring, `CreatePolygonRgn` curved outer arcs, and `CreateRoundRectRgn` for window cards and search/center pills) inset by `1.0 px` with hash-based change gating.
+
+- **Smooth Antialiased 3D Glass Bevel Edges (`src/shell/RingOverlay.cpp`, `src/tools/SettingsDialog.cpp`):**
+  - Kept the native A4S-Menu WCA interior texture 100% untouched while bridging the `1.0 px` `SetWindowRgn` perimeter with a `2.0 DIP` antialiased Direct2D edge-bridge, a subtle top-lit 3D outer glass bezel gradient, an optically recessed 3D inner hole bevel gradient, and a soft elevation shadow lip.
+  - Mirrored the same 3D glass bezel gradients and elevation lip in the persistent 1:1 Settings preview (`WinRingsTools.exe --settings`).
+
+- **Calibrated `dwmcore` / Direct2D 1.1 Parity (`src/shell/AcrylicBackdrop.cpp`, `src/shared/RingThemeEngine.h`, `tests/WinRingsTests.cpp`):**
+  - Fixed `CLSID_D2D1Flood` straight-RGBA handling and `D2D1_BLEND_MODE_COLOR` input semantics in `AcrylicBackdrop.cpp` (fallback path) so `dwmcore` and Direct2D 1.1 (`SettingsDialog.cpp` 1:1 preview) match within `±1/255` across dark, purple/blue wallpaper, and bright white backgrounds (`luminosity RGB(38,38,38) @ 0.90`, `tint RGB(32,32,32) @ 128/255`, `blurSigma = 30.0` DPI-scaled, triangular fine grain at `0.012`).
+
+---
+
 ## [v2.0.0] - 2026-11-21 (Release 2)
 
 ### Added & Improved

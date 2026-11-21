@@ -88,7 +88,15 @@ namespace winrings
         using ThemeColors = RingMaterialSpec;
 
         static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+        static LRESULT CALLBACK WcaBackdropWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
         LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
+
+        bool CreateWcaBackdropWindow();
+        void DestroyWcaBackdropWindow();
+        void UpdateWcaMaterial(const ThemeColors& tc);
+        void UpdateWcaRegion(float dpiScale, float openScale, float outerR, float holeR,
+            bool hasCurvedArc, bool hasQuery, const D2D1_ROUNDED_RECT& searchPill,
+            bool hasSummary, const D2D1_ROUNDED_RECT& centerPill);
 
         bool CreateGraphicsDevices();
         void ReleaseGraphicsDevices();
@@ -109,7 +117,7 @@ namespace winrings
         void StepAnimations();
         Microsoft::WRL::ComPtr<ID2D1Geometry> BuildAnnulusGeometry(float outerR, float holeR) const;
         Microsoft::WRL::ComPtr<ID2D1Geometry> BuildCurvedArcGeometry(const IconArcLayout& arc) const;
-        void DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill);
+        void DrawCurvedArcTrack(ID2D1Geometry* arcGeo, const IconArcLayout& arc, const ThemeColors& tc, bool paintFill, bool paintNoise);
         void Render();
         void ActivateSlotOrWindow(const RingSlot* slot, const WindowEntry* win, bool shiftHeld);
         void ShowContextMenuAt(POINT screenPt);
@@ -129,7 +137,15 @@ namespace winrings
         SwitcherConfig m_config;
 
         HWND m_hwnd = nullptr;
+        HWND m_wcaBackdropHwnd = nullptr;
         bool m_classRegistered = false;
+        bool m_wcaClassRegistered = false;
+        bool m_bufferedPaintInit = false;
+        bool m_wcaBackdropActive = false;
+        int m_lastWcaState = -1;
+        DWORD m_lastWcaGradColor = 0;
+        int m_lastWcaDark = -1;
+        uint64_t m_lastWcaRegionHash = 0;
         RingDropTarget* m_dropTarget = nullptr;
         DwmThumbPool m_thumbPool;
 

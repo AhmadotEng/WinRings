@@ -11,11 +11,11 @@ namespace winrings
     struct AcrylicMaterialParams
     {
         float blurSigma = 30.0f;
-        float saturation = 1.14f;
-        float luminosityR = 36.0f / 255.0f;
-        float luminosityG = 36.0f / 255.0f;
-        float luminosityB = 36.0f / 255.0f;
-        float luminosityAlpha = 0.34f;
+        float saturation = 1.15f;
+        float luminosityR = 38.0f / 255.0f;
+        float luminosityG = 38.0f / 255.0f;
+        float luminosityB = 38.0f / 255.0f;
+        float luminosityAlpha = 0.90f;
         float tintR = 32.0f / 255.0f;
         float tintG = 32.0f / 255.0f;
         float tintB = 32.0f / 255.0f;

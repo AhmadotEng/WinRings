@@ -1692,18 +1692,53 @@ namespace winrings::tools
                         m_previewCtx->FillGeometry(annulus.Get(), m_previewNoiseBrush.Get());
                 }
 
-                // Razor-thin A4S hairline edges
-                if (auto outerBr = mkBrush(tc.ringStroke))
+                // Silky antialiased 3D glass rims + soft elevation lip (matches live RingOverlay 1:1)
+                if (auto shBr = mkBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, tc.isLightText ? 0.30f : 0.14f)))
                 {
-                    const float halfSw = tc.ringStrokeWidth * 0.5f;
-                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, outerR - halfSw, outerR - halfSw), outerBr.Get(), tc.ringStrokeWidth);
+                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, outerR + 0.65f, outerR + 0.65f), shBr.Get(), 1.3f);
+                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, holeR - 0.55f, holeR - 0.55f), shBr.Get(), 1.1f);
                 }
-                if (auto innerBr = mkBrush(tc.innerRimStroke))
-                {
-                    const float innerSw = tc.ringStrokeWidth * 0.82f;
-                    const float halfSw = innerSw * 0.5f;
-                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, holeR + halfSw, holeR + halfSw), innerBr.Get(), innerSw);
-                }
+
+                auto makeRimGrad = [&](float yTop, float yBot, D2D1_COLOR_F cTop, D2D1_COLOR_F cMid, D2D1_COLOR_F cBot) {
+                    ComPtr<ID2D1LinearGradientBrush> lgb;
+                    D2D1_GRADIENT_STOP stops[3] = { { 0.0f, cTop }, { 0.52f, cMid }, { 1.0f, cBot } };
+                    ComPtr<ID2D1GradientStopCollection> gsc;
+                    if (SUCCEEDED(m_previewCtx->CreateGradientStopCollection(stops, 3, gsc.GetAddressOf())))
+                    {
+                        m_previewCtx->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(c.x, yTop), D2D1::Point2F(c.x, yBot)),
+                            gsc.Get(), lgb.GetAddressOf());
+                    }
+                    return lgb;
+                };
+
+                const D2D1_COLOR_F outerTop = (m_config.theme == RingTheme::Blue)
+                    ? D2D1::ColorF(132.0f / 255.0f, 198.0f / 255.0f, 1.0f, 0.62f)
+                    : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.25f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f));
+                const D2D1_COLOR_F outerMid = (m_config.theme == RingTheme::Blue)
+                    ? tc.ringStroke
+                    : (tc.isLightText ? D2D1::ColorF(118.0f / 255.0f, 118.0f / 255.0f, 124.0f / 255.0f, 0.42f)
+                                      : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.55f));
+                const D2D1_COLOR_F outerBot = (m_config.theme == RingTheme::Blue)
+                    ? D2D1::ColorF(52.0f / 255.0f, 120.0f / 255.0f, 230.0f / 255.0f, 0.34f)
+                    : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f)
+                                      : D2D1::ColorF(120.0f / 255.0f, 126.0f / 255.0f, 138.0f / 255.0f, 0.42f));
+                if (auto outerGrad = makeRimGrad(c.y - outerR, c.y + outerR, outerTop, outerMid, outerBot))
+                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, outerR - 0.525f, outerR - 0.525f), outerGrad.Get(), 1.05f);
+
+                const D2D1_COLOR_F innerTop = (m_config.theme == RingTheme::Blue)
+                    ? D2D1::ColorF(48.0f / 255.0f, 110.0f / 255.0f, 210.0f / 255.0f, 0.28f)
+                    : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.07f)
+                                      : D2D1::ColorF(110.0f / 255.0f, 116.0f / 255.0f, 126.0f / 255.0f, 0.34f));
+                const D2D1_COLOR_F innerMid = (m_config.theme == RingTheme::Blue)
+                    ? tc.innerRimStroke
+                    : (tc.isLightText ? D2D1::ColorF(108.0f / 255.0f, 108.0f / 255.0f, 114.0f / 255.0f, 0.32f)
+                                      : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.45f));
+                const D2D1_COLOR_F innerBot = (m_config.theme == RingTheme::Blue)
+                    ? D2D1::ColorF(126.0f / 255.0f, 190.0f / 255.0f, 1.0f, 0.48f)
+                    : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.20f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.72f));
+                if (auto innerGrad = makeRimGrad(c.y - holeR, c.y + holeR, innerTop, innerMid, innerBot))
+                    m_previewCtx->DrawEllipse(D2D1::Ellipse(c, holeR + 0.475f, holeR + 0.475f), innerGrad.Get(), 0.95f);
 
                 // Real slots, running dots, hover selection highlight, and real extracted shell icons
                 constexpr float kIdleScale = 0.90f;

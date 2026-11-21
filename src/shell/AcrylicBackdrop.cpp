@@ -442,9 +442,12 @@ namespace winrings
                     backdropStage = sat;
                 }
 
-                // Windows.UI.Composition requires a strict tree effect graph (no shared parent nodes).
-                // Feeding premultiplied luminosity Flood (r*lumA, g*lumA, b*lumA, lumA) into CLSID_D2D1Blend
-                // (D2D1_BLEND_MODE_LUMINOSITY) blends (1 - lumA) * backdrop + lumA * Lum(backdrop, lumColor) in one linear pass.
+                // Windows.UI.Composition (dwmcore) requires a strict tree effect graph (no shared parent nodes).
+                // Empirically verified on Windows 11 dwmcore:
+                //   1) CLSID_D2D1Flood expects STRAIGHT RGBA (dwmcore premultiplies RGB by A internally).
+                //   2) CLSID_D2D1Blend takes D2D1_BLEND_MODE_COLOR with { backdropStage, lumFlood } to keep
+                //      the backdrop's hue & saturation while applying lumFlood's luminosity at lumA opacity
+                //      (matching Direct2D's D2D1_BLEND_MODE_LUMINOSITY with { backdropStage, premulLumFlood } 1:1).
                 const float lumA = std::clamp(params.luminosityAlpha, 0.0f, 1.0f);
                 if (withLuminosity && lumA > 0.01f)
                 {
@@ -453,7 +456,7 @@ namespace winrings
                         L"LuminosityFlood",
                         std::vector<EffectPropSpec>{
                             { L"Color", ABI::Windows::Graphics::Effects::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
-                              MakeSingle4(params.luminosityR * lumA, params.luminosityG * lumA, params.luminosityB * lumA, lumA) },
+                              MakeSingle4(params.luminosityR, params.luminosityG, params.luminosityB, lumA) },
                         },
                         std::vector<wge::IGraphicsEffectSource>{});
 
@@ -462,20 +465,20 @@ namespace winrings
                         L"LuminosityBlend",
                         std::vector<EffectPropSpec>{
                             { L"Mode", ABI::Windows::Graphics::Effects::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
-                              MakeUInt32(static_cast<uint32_t>(D2D1_BLEND_MODE_LUMINOSITY)) },
+                              MakeUInt32(static_cast<uint32_t>(D2D1_BLEND_MODE_COLOR)) },
                         },
                         std::vector<wge::IGraphicsEffectSource>{ backdropStage, lumFlood });
                     backdropStage = lumBlend;
                 }
 
-                // CLSID_D2D1Flood expects premultiplied RGBA when composited with D2D1Composite SourceOver.
+                // Pass STRAIGHT RGBA to CLSID_D2D1Flood because dwmcore premultiplies Flood Color internally.
                 const float a = std::clamp(params.tintAlpha, 0.0f, 1.0f);
                 auto tintFlood = winrt::make<D2D1InteropEffect>(
                     CLSID_D2D1Flood,
                     L"TintFlood",
                     std::vector<EffectPropSpec>{
                         { L"Color", ABI::Windows::Graphics::Effects::GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
-                          MakeSingle4(params.tintR * a, params.tintG * a, params.tintB * a, a) },
+                          MakeSingle4(params.tintR, params.tintG, params.tintB, a) },
                     },
                     std::vector<wge::IGraphicsEffectSource>{});
 
