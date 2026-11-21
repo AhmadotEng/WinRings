@@ -25,7 +25,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../shared/ClockFormat.h"
 #include "../shared/RadialMath.h"
 #include "../shared/RingThemeEngine.h"
 #include "../shared/WinRingsIdentity.h"
@@ -42,7 +41,7 @@ namespace winrings::tools
         constexpr int kFooterH = 58;
         constexpr int kPreviewW = 356;
         constexpr int kPreviewBarH = 28;
-        constexpr int kPageCount = 5;
+        constexpr int kPageCount = 4;
 
         // Modern Windows 11 Dark Fluent palette
         constexpr COLORREF kColBg      = RGB(28, 28, 30);
@@ -82,27 +81,8 @@ namespace winrings::tools
             ID_CHK_MENU_KEY,
             ID_CHK_WIN_TAB,
             ID_CHK_ALT_TAB,
-            ID_CHK_TOPBAR_BTN,
 
-            // Page 2: Top Bar & Clock
-            ID_CHK_TOPBAR_ON = 400,
-            ID_CHK_DOCK_TOP,
-            ID_SLD_BAR_H,
-            ID_ED_BAR_H,
-            ID_CHK_KEEP_FONT,
-            ID_CHK_CLOCK_1L,
-            ID_ED_CLOCK_FMT,
-            ID_CB_CLOCK_CASING,
-            ID_LBL_CLOCK_PREVIEW,
-            ID_CHK_HIDE_APPS,
-            ID_CHK_HIDE_START,
-            ID_CHK_HIDE_SEARCH,
-            ID_CHK_HIDE_TASKVIEW,
-            ID_CHK_HIDE_WIDGETS,
-            ID_CB_BACKDROP,
-            ID_CHK_ALL_MON,
-
-            // Page 3: Pins & Folders
+            // Page 2: Pins & Folders
             ID_LB_PINS = 500,
             ID_CB_PIN_KIND,
             ID_ED_PIN_LABEL,
@@ -116,7 +96,7 @@ namespace winrings::tools
             ID_BTN_PIN_UP,
             ID_BTN_PIN_DOWN,
 
-            // Page 4: Advanced
+            // Page 3: Advanced
             ID_ED_RADIUS = 600,
             ID_ED_DEADZONE,
             ID_ED_ICONSIZE,
@@ -129,7 +109,6 @@ namespace winrings::tools
             ID_CHK_SHIFT_CENTER,
             ID_CHK_INCLUDE_UNPINNED,
             ID_ED_MAXSLOTS,
-            ID_ED_FFMPEG,
         };
 
         struct KeyEntry
@@ -158,7 +137,6 @@ namespace winrings::tools
         constexpr const wchar_t* kPageTitles[kPageCount] = {
             L"Appearance",
             L"Triggers & Input",
-            L"Top Bar & Clock",
             L"Pins & Folders",
             L"Advanced"
         };
@@ -166,9 +144,8 @@ namespace winrings::tools
         constexpr const wchar_t* kPageSubtitles[kPageCount] = {
             L"Choose a visual style and adjust glass transparency & light/dark tone.",
             L"Configure mouse button triggers, double-tap switching, and hotkeys.",
-            L"Customize the unified minimal Windows 11 top bar and clock.",
             L"Manage pinned apps, websites, folders, and radial collections.",
-            L"Tune ring geometry, submenu mode, animations, and ffmpeg integration."
+            L"Tune ring geometry, submenu mode, and animations."
         };
 
         void EnableDarkAppTheme() noexcept
@@ -2007,125 +1984,72 @@ namespace winrings::tools
                 m_chkWinTab = MakeCtrl(1, L"BUTTON", L"Optional Shell Interception: Win + Tab", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 380, 24, ID_CHK_WIN_TAB);
                 y += 30;
                 m_chkAltTab = MakeCtrl(1, L"BUTTON", L"Optional Shell Interception: Alt + Tab", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 380, 24, ID_CHK_ALT_TAB);
-                y += 30;
-                m_chkTopBarBtn = MakeCtrl(1, L"BUTTON", L"Show Top-Bar Ring Toggle Pill on Primary Monitor", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 440, 24, ID_CHK_TOPBAR_BTN);
 
-                // Page 2: Top Bar & Clock
-                y = 84;
-                m_chkTopBarOn = MakeCtrl(2, L"BUTTON", L"Enable Unified Minimal Top Bar (Windows 11 Shell Integration)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 540, 24, ID_CHK_TOPBAR_ON);
-                y += 30;
-                m_chkDockTop = MakeCtrl(2, L"BUTTON", L"Dock Taskbar to Top Monitor Edge (updates Desktop Work Area)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 540, 24, ID_CHK_DOCK_TOP);
-                y += 36;
-
-                MakeCtrl(2, L"STATIC", L"Bar Height (28-40 DIP):", 0, px, y + 3, 175, 22, 0);
-                m_sldBarH = MakeCtrl(2, TRACKBAR_CLASSW, L"", TBS_AUTOTICKS | WS_TABSTOP, px + 184, y, 200, 28, ID_SLD_BAR_H);
-                SendMessageW(m_sldBarH, TBM_SETRANGE, TRUE, MAKELPARAM(28, 40));
-                m_edBarH = MakeCtrl(2, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 394, y + 2, 56, 24, ID_ED_BAR_H);
-                y += 36;
-
-                m_chkKeepFont = MakeCtrl(2, L"BUTTON", L"Keep Text Font Size Unchanged (Native Taskbar Font Size)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 520, 24, ID_CHK_KEEP_FONT);
-                y += 30;
-                m_chkClock1L = MakeCtrl(2, L"BUTTON", L"Single-Line Compact Clock (replaces two-line date/time)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, 500, 24, ID_CHK_CLOCK_1L);
-                y += 34;
-
-                MakeCtrl(2, L"STATIC", L"Clock Format:", 0, px, y + 3, 120, 22, 0);
-                m_edClockFmt = MakeCtrl(2, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 128, y, 220, 24, ID_ED_CLOCK_FMT);
-                MakeCtrl(2, L"STATIC", L"Casing:", 0, px + 362, y + 3, 60, 22, 0);
-                m_cbClockCasing = MakeCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 426, y, 160, 140, ID_CB_CLOCK_CASING);
-                for (const wchar_t* c : { L"CompactLower", L"Default", L"Lowercase", L"Uppercase" })
-                    SendMessageW(m_cbClockCasing, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(c));
-                y += 34;
-
-                MakeCtrl(2, L"STATIC", L"Clock Preview:", 0, px, y + 3, 120, 22, 0);
-                m_lblClockPreview = MakeCtrl(2, L"STATIC", L"", SS_SUNKEN | SS_CENTERIMAGE, px + 128, y, 280, 26, ID_LBL_CLOCK_PREVIEW);
-                SendMessageW(m_lblClockPreview, WM_SETFONT, reinterpret_cast<WPARAM>(m_boldFont), TRUE);
-                y += 38;
-
-                MakeCtrl(2, L"STATIC", L"Taskbar Chrome Elements:", 0, px, y, 240, 22, 0);
-                y += 26;
-                m_chkHideApps = MakeCtrl(2, L"BUTTON", L"Hide Taskbar App Buttons (preserve System Tray)", BS_AUTOCHECKBOX | WS_TABSTOP, px + 16, y, 360, 22, ID_CHK_HIDE_APPS);
-                m_chkHideStart = MakeCtrl(2, L"BUTTON", L"Hide Start Button", BS_AUTOCHECKBOX | WS_TABSTOP, px + 394, y, 180, 22, ID_CHK_HIDE_START);
-                y += 28;
-                m_chkHideSearch = MakeCtrl(2, L"BUTTON", L"Hide Search", BS_AUTOCHECKBOX | WS_TABSTOP, px + 16, y, 150, 22, ID_CHK_HIDE_SEARCH);
-                m_chkHideTaskView = MakeCtrl(2, L"BUTTON", L"Hide Task View", BS_AUTOCHECKBOX | WS_TABSTOP, px + 186, y, 160, 22, ID_CHK_HIDE_TASKVIEW);
-                m_chkHideWidgets = MakeCtrl(2, L"BUTTON", L"Hide Widgets", BS_AUTOCHECKBOX | WS_TABSTOP, px + 394, y, 170, 22, ID_CHK_HIDE_WIDGETS);
-                y += 36;
-
-                MakeCtrl(2, L"STATIC", L"Backdrop Style:", 0, px, y + 3, 120, 22, 0);
-                m_cbBackdrop = MakeCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 128, y, 160, 120, ID_CB_BACKDROP);
-                for (const wchar_t* b : { L"Clear", L"Frosted", L"Native" })
-                    SendMessageW(m_cbBackdrop, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(b));
-                m_chkAllMon = MakeCtrl(2, L"BUTTON", L"Apply to All Monitors", BS_AUTOCHECKBOX | WS_TABSTOP, px + 320, y + 2, 220, 24, ID_CHK_ALL_MON);
-
-                // Page 3: Pins & Folders (paired with persistent live 1:1 preview on the right)
-                m_lbPins = MakeCtrl(3, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL | WS_TABSTOP, px, 78, leftW, 204, ID_LB_PINS);
+                // Page 2: Pins & Folders (paired with persistent live 1:1 preview on the right)
+                m_lbPins = MakeCtrl(2, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL | WS_TABSTOP, px, 78, leftW, 204, ID_LB_PINS);
                 int py = 294;
-                MakeCtrl(3, L"STATIC", L"Kind:", 0, px, py + 3, 52, 22, 0);
-                m_cbPinKind = MakeCtrl(3, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 56, py, 146, 160, ID_CB_PIN_KIND);
+                MakeCtrl(2, L"STATIC", L"Kind:", 0, px, py + 3, 52, 22, 0);
+                m_cbPinKind = MakeCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 56, py, 146, 160, ID_CB_PIN_KIND);
                 for (const wchar_t* k : { L"App", L"Website", L"File", L"Folder", L"Script", L"Collection", L"RecycleBin" })
                     SendMessageW(m_cbPinKind, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(k));
-                MakeCtrl(3, L"STATIC", L"Max Items:", 0, px + 220, py + 3, 82, 22, 0);
-                m_edPinFolderMax = MakeCtrl(3, L"EDIT", L"8", WS_BORDER | WS_TABSTOP, px + 306, py, 56, 24, ID_ED_PIN_FOLDER_MAX);
+                MakeCtrl(2, L"STATIC", L"Max Items:", 0, px + 220, py + 3, 82, 22, 0);
+                m_edPinFolderMax = MakeCtrl(2, L"EDIT", L"8", WS_BORDER | WS_TABSTOP, px + 306, py, 56, 24, ID_ED_PIN_FOLDER_MAX);
                 py += 36;
 
-                MakeCtrl(3, L"STATIC", L"Label:", 0, px, py + 3, 52, 22, 0);
-                m_edPinLabel = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 56, py, leftW - 56, 24, ID_ED_PIN_LABEL);
+                MakeCtrl(2, L"STATIC", L"Label:", 0, px, py + 3, 52, 22, 0);
+                m_edPinLabel = MakeCtrl(2, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 56, py, leftW - 56, 24, ID_ED_PIN_LABEL);
                 py += 36;
 
-                MakeCtrl(3, L"STATIC", L"Path:", 0, px, py + 3, 52, 22, 0);
-                m_edPinPath = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 56, py, leftW - 216, 24, ID_ED_PIN_PATH);
-                MakeCtrl(3, L"BUTTON", L"File...", BS_OWNERDRAW | WS_TABSTOP, px + leftW - 152, py - 1, 72, 28, ID_BTN_BROWSE_FILE);
-                MakeCtrl(3, L"BUTTON", L"Folder...", BS_OWNERDRAW | WS_TABSTOP, px + leftW - 74, py - 1, 74, 28, ID_BTN_BROWSE_DIR);
+                MakeCtrl(2, L"STATIC", L"Path:", 0, px, py + 3, 52, 22, 0);
+                m_edPinPath = MakeCtrl(2, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 56, py, leftW - 216, 24, ID_ED_PIN_PATH);
+                MakeCtrl(2, L"BUTTON", L"File...", BS_OWNERDRAW | WS_TABSTOP, px + leftW - 152, py - 1, 72, 28, ID_BTN_BROWSE_FILE);
+                MakeCtrl(2, L"BUTTON", L"Folder...", BS_OWNERDRAW | WS_TABSTOP, px + leftW - 74, py - 1, 74, 28, ID_BTN_BROWSE_DIR);
                 py += 40;
 
                 const int btnW3 = (leftW - 20) / 3;
-                MakeCtrl(3, L"BUTTON", L"Add Slot", BS_OWNERDRAW | WS_TABSTOP, px, py, btnW3, 30, ID_BTN_PIN_ADD);
-                MakeCtrl(3, L"BUTTON", L"Update", BS_OWNERDRAW | WS_TABSTOP, px + btnW3 + 10, py, btnW3, 30, ID_BTN_PIN_UPDATE);
-                MakeCtrl(3, L"BUTTON", L"Remove", BS_OWNERDRAW | WS_TABSTOP, px + (btnW3 + 10) * 2, py, btnW3, 30, ID_BTN_PIN_REMOVE);
+                MakeCtrl(2, L"BUTTON", L"Add Slot", BS_OWNERDRAW | WS_TABSTOP, px, py, btnW3, 30, ID_BTN_PIN_ADD);
+                MakeCtrl(2, L"BUTTON", L"Update", BS_OWNERDRAW | WS_TABSTOP, px + btnW3 + 10, py, btnW3, 30, ID_BTN_PIN_UPDATE);
+                MakeCtrl(2, L"BUTTON", L"Remove", BS_OWNERDRAW | WS_TABSTOP, px + (btnW3 + 10) * 2, py, btnW3, 30, ID_BTN_PIN_REMOVE);
                 py += 38;
-                MakeCtrl(3, L"BUTTON", L"Move Up", BS_OWNERDRAW | WS_TABSTOP, px, py, btnW3, 30, ID_BTN_PIN_UP);
-                MakeCtrl(3, L"BUTTON", L"Move Down", BS_OWNERDRAW | WS_TABSTOP, px + btnW3 + 10, py, btnW3, 30, ID_BTN_PIN_DOWN);
+                MakeCtrl(2, L"BUTTON", L"Move Up", BS_OWNERDRAW | WS_TABSTOP, px, py, btnW3, 30, ID_BTN_PIN_UP);
+                MakeCtrl(2, L"BUTTON", L"Move Down", BS_OWNERDRAW | WS_TABSTOP, px + btnW3 + 10, py, btnW3, 30, ID_BTN_PIN_DOWN);
 
-                // Page 4: Advanced (paired with persistent live 1:1 preview on the right)
+                // Page 3: Advanced (paired with persistent live 1:1 preview on the right)
                 y = 80;
                 const int col2X = px + leftW / 2 + 6;
-                MakeCtrl(4, L"STATIC", L"Ring Radius:", 0, px, y + 3, 108, 22, 0);
-                m_edRadius = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_RADIUS);
-                MakeCtrl(4, L"STATIC", L"Deadzone:", 0, col2X, y + 3, 98, 22, 0);
-                m_edDeadzone = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 74, 24, ID_ED_DEADZONE);
+                MakeCtrl(3, L"STATIC", L"Ring Radius:", 0, px, y + 3, 108, 22, 0);
+                m_edRadius = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_RADIUS);
+                MakeCtrl(3, L"STATIC", L"Deadzone:", 0, col2X, y + 3, 98, 22, 0);
+                m_edDeadzone = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 74, 24, ID_ED_DEADZONE);
                 y += 36;
 
-                MakeCtrl(4, L"STATIC", L"Icon Size:", 0, px, y + 3, 108, 22, 0);
-                m_edIconSize = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_ICONSIZE);
-                MakeCtrl(4, L"STATIC", L"Preview Scale:", 0, col2X, y + 3, 98, 22, 0);
-                m_edThumbScale = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 74, 24, ID_ED_THUMBSCALE);
+                MakeCtrl(3, L"STATIC", L"Icon Size:", 0, px, y + 3, 108, 22, 0);
+                m_edIconSize = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_ICONSIZE);
+                MakeCtrl(3, L"STATIC", L"Preview Scale:", 0, col2X, y + 3, 98, 22, 0);
+                m_edThumbScale = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 74, 24, ID_ED_THUMBSCALE);
                 y += 36;
 
-                MakeCtrl(4, L"STATIC", L"Max Slots:", 0, px, y + 3, 108, 22, 0);
-                m_edMaxSlots = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_MAXSLOTS);
-                MakeCtrl(4, L"STATIC", L"Accent Hex:", 0, col2X, y + 3, 98, 22, 0);
-                m_edAccent = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 86, 24, ID_ED_ACCENT);
+                MakeCtrl(3, L"STATIC", L"Max Slots:", 0, px, y + 3, 108, 22, 0);
+                m_edMaxSlots = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, 74, 24, ID_ED_MAXSLOTS);
+                MakeCtrl(3, L"STATIC", L"Accent Hex:", 0, col2X, y + 3, 98, 22, 0);
+                m_edAccent = MakeCtrl(3, L"EDIT", L"", WS_BORDER | WS_TABSTOP, col2X + 102, y, 86, 24, ID_ED_ACCENT);
                 y += 38;
 
-                MakeCtrl(4, L"STATIC", L"Window View:", 0, px, y + 3, 108, 22, 0);
-                m_cbWinView = MakeCtrl(4, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 112, y, leftW - 112, 120, ID_CB_WINVIEW);
+                MakeCtrl(3, L"STATIC", L"Window View:", 0, px, y + 3, 108, 22, 0);
+                m_cbWinView = MakeCtrl(3, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, px + 112, y, leftW - 112, 120, ID_CB_WINVIEW);
                 SendMessageW(m_cbWinView, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"OuterArc (Thumbnails)"));
                 SendMessageW(m_cbWinView, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"TitleColumn"));
                 y += 40;
 
-                m_chkNoAnim = MakeCtrl(4, L"BUTTON", L"Disable Opening Animation (Frame-0 Instant)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_NO_ANIM);
+                m_chkNoAnim = MakeCtrl(3, L"BUTTON", L"Disable Opening Animation (Frame-0 Instant)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_NO_ANIM);
                 y += 28;
-                m_chkFanOne = MakeCtrl(4, L"BUTTON", L"Fan out live DWM preview even for 1 window", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_FANOUT_ONE);
+                m_chkFanOne = MakeCtrl(3, L"BUTTON", L"Fan out live DWM preview even for 1 window", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_FANOUT_ONE);
                 y += 28;
-                m_chkPtrFollow = MakeCtrl(4, L"BUTTON", L"Pointer Follow (160ms glide on focus switch)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_PTR_FOLLOW);
+                m_chkPtrFollow = MakeCtrl(3, L"BUTTON", L"Pointer Follow (160ms glide on focus switch)", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_PTR_FOLLOW);
                 y += 28;
-                m_chkShiftCenter = MakeCtrl(4, L"BUTTON", L"Shift-Center overlay & window on active monitor", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_SHIFT_CENTER);
+                m_chkShiftCenter = MakeCtrl(3, L"BUTTON", L"Shift-Center overlay & window on active monitor", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_SHIFT_CENTER);
                 y += 28;
-                m_chkIncludeUnpinned = MakeCtrl(4, L"BUTTON", L"Include unpinned running apps in Ring slots", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_INCLUDE_UNPINNED);
-                y += 36;
-
-                MakeCtrl(4, L"STATIC", L"ffmpeg Path:", 0, px, y + 3, 108, 22, 0);
-                m_edFfmpeg = MakeCtrl(4, L"EDIT", L"", WS_BORDER | WS_TABSTOP, px + 112, y, leftW - 112, 24, ID_ED_FFMPEG);
+                m_chkIncludeUnpinned = MakeCtrl(3, L"BUTTON", L"Include unpinned running apps in Ring slots", BS_AUTOCHECKBOX | WS_TABSTOP, px, y, leftW, 24, ID_CHK_INCLUDE_UNPINNED);
 
                 // Persistent Footer Bar
                 const int fy = ch - kFooterH + 13;
@@ -2157,7 +2081,7 @@ namespace winrings::tools
                 }
                 if (m_ringCanvas)
                 {
-                    const bool showPreview = (index == 0 || index == 3 || index == 4);
+                    const bool showPreview = (index == 0 || index == 2 || index == 3);
                     ShowWindow(m_ringCanvas, showPreview ? SW_SHOW : SW_HIDE);
                     if (showPreview)
                         InvalidateRect(m_ringCanvas, nullptr, FALSE);
@@ -2194,7 +2118,6 @@ namespace winrings::tools
                 SendMessageW(m_chkMenuKey, BM_SETCHECK, m_config.menuKeyEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
                 SendMessageW(m_chkWinTab, BM_SETCHECK, m_config.interceptWinTab ? BST_CHECKED : BST_UNCHECKED, 0);
                 SendMessageW(m_chkAltTab, BM_SETCHECK, m_config.interceptAltTab ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkTopBarBtn, BM_SETCHECK, m_config.topBarRingButton ? BST_CHECKED : BST_UNCHECKED, 0);
 
                 SetWindowTextW(m_edAccent, m_config.accentColor.c_str());
                 wchar_t num[32]{};
@@ -2214,28 +2137,8 @@ namespace winrings::tools
                 SendMessageW(m_chkShiftCenter, BM_SETCHECK, m_config.shiftCenterOnActiveMonitor ? BST_CHECKED : BST_UNCHECKED, 0);
                 SendMessageW(m_chkIncludeUnpinned, BM_SETCHECK, m_config.includeUnpinnedRunningApps ? BST_CHECKED : BST_UNCHECKED, 0);
                 SetWindowTextW(m_edMaxSlots, std::to_wstring(m_config.maxSlots).c_str());
-                SetWindowTextW(m_edFfmpeg, m_config.ffmpegPath.c_str());
-
-                SendMessageW(m_chkTopBarOn, BM_SETCHECK, m_config.topBarEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkDockTop, BM_SETCHECK, m_config.topBarDockTop ? BST_CHECKED : BST_UNCHECKED, 0);
-                const int barH = (std::clamp)(m_config.topBarHeightDip, 28, 40);
-                SendMessageW(m_sldBarH, TBM_SETPOS, TRUE, static_cast<LPARAM>(barH));
-                SetWindowTextW(m_edBarH, std::to_wstring(barH).c_str());
-                SendMessageW(m_chkKeepFont, BM_SETCHECK, m_config.topBarPreserveFontSize ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkClock1L, BM_SETCHECK, m_config.topBarClockSingleLine ? BST_CHECKED : BST_UNCHECKED, 0);
-                SetWindowTextW(m_edClockFmt, m_config.topBarClockFormat.c_str());
-                SendMessageW(m_cbClockCasing, CB_SETCURSEL, static_cast<WPARAM>(static_cast<int>(m_config.topBarClockCasing)), 0);
-
-                SendMessageW(m_chkHideApps, BM_SETCHECK, m_config.topBarHideAppButtons ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkHideStart, BM_SETCHECK, m_config.topBarHideStart ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkHideSearch, BM_SETCHECK, m_config.topBarHideSearch ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkHideTaskView, BM_SETCHECK, m_config.topBarHideTaskView ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_chkHideWidgets, BM_SETCHECK, m_config.topBarHideWidgets ? BST_CHECKED : BST_UNCHECKED, 0);
-                SendMessageW(m_cbBackdrop, CB_SETCURSEL, static_cast<WPARAM>(static_cast<int>(m_config.topBarBackdrop)), 0);
-                SendMessageW(m_chkAllMon, BM_SETCHECK, m_config.topBarAllMonitors ? BST_CHECKED : BST_UNCHECKED, 0);
 
                 RefreshPinsList();
-                UpdateClockPreview();
                 RebuildPreviewSlots();
                 if (m_appearanceCtrl) InvalidateRect(m_appearanceCtrl, nullptr, FALSE);
                 if (m_ringCanvas) InvalidateRect(m_ringCanvas, nullptr, FALSE);
@@ -2253,17 +2156,6 @@ namespace winrings::tools
                     SendMessageW(m_lbPins, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
                 }
                 SendMessageW(m_cbPinKind, CB_SETCURSEL, 0, 0);
-            }
-
-            void UpdateClockPreview()
-            {
-                const std::wstring fmt = GetText(m_edClockFmt);
-                const int cIdx = static_cast<int>(SendMessageW(m_cbClockCasing, CB_GETCURSEL, 0, 0));
-                const ClockCasing casing = (cIdx >= 0 && cIdx <= 3) ? static_cast<ClockCasing>(cIdx) : ClockCasing::CompactLower;
-                SYSTEMTIME st{};
-                GetLocalTime(&st);
-                const std::wstring text = FormatClock(st, fmt, casing);
-                SetWindowTextW(m_lblClockPreview, text.c_str());
             }
 
             void SyncPreviewRelevantFields()
@@ -2306,7 +2198,6 @@ namespace winrings::tools
                 m_config.menuKeyEnabled = isChk(m_chkMenuKey);
                 m_config.interceptWinTab = isChk(m_chkWinTab);
                 m_config.interceptAltTab = isChk(m_chkAltTab);
-                m_config.topBarRingButton = isChk(m_chkTopBarBtn);
 
                 m_config.glassLevel = (std::clamp)(m_config.glassLevel, 0, 100);
                 m_config.lightDarkMode = (std::clamp)(m_config.lightDarkMode, 0, 100);
@@ -2324,24 +2215,6 @@ namespace winrings::tools
                 m_config.shiftCenterOnActiveMonitor = isChk(m_chkShiftCenter);
                 m_config.includeUnpinnedRunningApps = isChk(m_chkIncludeUnpinned);
                 m_config.maxSlots = (std::clamp)(ParseIntOr(GetText(m_edMaxSlots), 14), 4, 24);
-                m_config.ffmpegPath = GetText(m_edFfmpeg);
-                if (m_config.ffmpegPath.empty()) m_config.ffmpegPath = L"ffmpeg";
-
-                m_config.topBarEnabled = isChk(m_chkTopBarOn);
-                m_config.topBarDockTop = isChk(m_chkDockTop);
-                m_config.topBarHeightDip = (std::clamp)(ParseIntOr(GetText(m_edBarH), 30), 28, 40);
-                m_config.topBarPreserveFontSize = isChk(m_chkKeepFont);
-                m_config.topBarClockSingleLine = isChk(m_chkClock1L);
-                m_config.topBarClockFormat = GetText(m_edClockFmt);
-                if (m_config.topBarClockFormat.empty()) m_config.topBarClockFormat = L"ddd d MMM  h:mm tt";
-                m_config.topBarClockCasing = static_cast<ClockCasing>(cbIdx(m_cbClockCasing, 3));
-                m_config.topBarHideAppButtons = isChk(m_chkHideApps);
-                m_config.topBarHideStart = isChk(m_chkHideStart);
-                m_config.topBarHideSearch = isChk(m_chkHideSearch);
-                m_config.topBarHideTaskView = isChk(m_chkHideTaskView);
-                m_config.topBarHideWidgets = isChk(m_chkHideWidgets);
-                m_config.topBarBackdrop = static_cast<TopBarBackdrop>(cbIdx(m_cbBackdrop, 2));
-                m_config.topBarAllMonitors = isChk(m_chkAllMon);
             }
 
             void DrawOwnerButton(const DRAWITEMSTRUCT* dis) const
@@ -2405,17 +2278,6 @@ namespace winrings::tools
                     DrawOwnerButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lp));
                     return TRUE;
 
-                case WM_HSCROLL:
-                    if (reinterpret_cast<HWND>(lp) == m_sldBarH)
-                    {
-                        const int v = static_cast<int>(SendMessageW(m_sldBarH, TBM_GETPOS, 0, 0));
-                        m_populating = true;
-                        SetWindowTextW(m_edBarH, std::to_wstring(v).c_str());
-                        m_populating = false;
-                        return 0;
-                    }
-                    break;
-
                 case WM_CTLCOLORSTATIC:
                 {
                     HDC hdc = reinterpret_cast<HDC>(wp);
@@ -2467,19 +2329,9 @@ namespace winrings::tools
 
                     if (!m_populating)
                     {
-                        if ((id == ID_ED_CLOCK_FMT && code == EN_CHANGE) ||
-                            (id == ID_CB_CLOCK_CASING && code == CBN_SELCHANGE))
-                        {
-                            UpdateClockPreview();
-                        }
-                        else if (id == ID_ED_BAR_H && code == EN_CHANGE)
-                        {
-                            const int v = (std::clamp)(ParseIntOr(GetText(m_edBarH), 30), 28, 40);
-                            SendMessageW(m_sldBarH, TBM_SETPOS, TRUE, static_cast<LPARAM>(v));
-                        }
-                        else if (((id == ID_ED_RADIUS || id == ID_ED_DEADZONE || id == ID_ED_ICONSIZE ||
-                                   id == ID_ED_MAXSLOTS || id == ID_ED_ACCENT) && code == EN_CHANGE) ||
-                                 (id == ID_CHK_INCLUDE_UNPINNED && code == BN_CLICKED))
+                        if (((id == ID_ED_RADIUS || id == ID_ED_DEADZONE || id == ID_ED_ICONSIZE ||
+                              id == ID_ED_MAXSLOTS || id == ID_ED_ACCENT) && code == EN_CHANGE) ||
+                            (id == ID_CHK_INCLUDE_UNPINNED && code == BN_CLICKED))
                         {
                             SyncPreviewRelevantFields();
                         }
@@ -2704,19 +2556,14 @@ namespace winrings::tools
             int m_prevSwapW = 0;
             int m_prevSwapH = 0;
 
-            // Controls (Pages 1-4)
+            // Controls (Pages 1-3)
             HWND m_cbMouseTrigger{}, m_cbScrollMode{}, m_chkDoubleTap{}, m_edTapMs{}, m_edDTapMs{};
             HWND m_chkHotkey{}, m_chkModAlt{}, m_chkModCtrl{}, m_chkModShift{}, m_chkModWin{}, m_cbHotkeyVk{};
-            HWND m_chkMenuKey{}, m_chkWinTab{}, m_chkAltTab{}, m_chkTopBarBtn{};
+            HWND m_chkMenuKey{}, m_chkWinTab{}, m_chkAltTab{};
 
             HWND m_edAccent{}, m_edRadius{}, m_edDeadzone{}, m_edIconSize{}, m_edThumbScale{};
             HWND m_cbWinView{}, m_chkNoAnim{}, m_chkFanOne{}, m_chkPtrFollow{}, m_chkShiftCenter{}, m_chkIncludeUnpinned{};
-            HWND m_edMaxSlots{}, m_edFfmpeg{}, m_ringCanvas{};
-
-            HWND m_chkTopBarOn{}, m_chkDockTop{}, m_sldBarH{}, m_edBarH{}, m_chkKeepFont{}, m_chkClock1L{};
-            HWND m_edClockFmt{}, m_cbClockCasing{}, m_lblClockPreview{};
-            HWND m_chkHideApps{}, m_chkHideStart{}, m_chkHideSearch{}, m_chkHideTaskView{}, m_chkHideWidgets{};
-            HWND m_cbBackdrop{}, m_chkAllMon{};
+            HWND m_edMaxSlots{}, m_ringCanvas{};
 
             HWND m_lbPins{}, m_cbPinKind{}, m_edPinLabel{}, m_edPinPath{}, m_edPinFolderMax{};
         };

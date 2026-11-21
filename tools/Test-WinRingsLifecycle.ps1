@@ -9,11 +9,6 @@ if (-not $AllowExplorerInjection) {
     exit 2
 }
 
-if (Get-Process -Name 'ClearTaskbar' -ErrorAction SilentlyContinue) {
-    Write-Host 'Refusing test: ClearTaskbar.exe is currently running. Stop ClearTaskbar first before testing WinRings TopBar in Explorer.'
-    exit 3
-}
-
 $root = Split-Path -Parent $PSScriptRoot
 $hostExe = "$root\build\stage\WinRings\WinRingsHost.exe"
 $shellDll = "$root\build\stage\WinRings\WinRingsShell.dll"
@@ -47,7 +42,7 @@ try {
     if (-not $ready) { throw "WinRingsHost did not reach READY state within 12s" }
     Write-Host '  Status: ready'
 
-    foreach ($cmd in @('--toggle', '--toggle', '--reload', '--toggle-topbar', '--toggle-topbar')) {
+    foreach ($cmd in @('--toggle', '--toggle', '--reload')) {
         & $hostExe $cmd
         if ($LASTEXITCODE -ne 0) { throw "Command $cmd failed ($LASTEXITCODE)" }
         Start-Sleep -Milliseconds 350

@@ -22,7 +22,6 @@ namespace
 
     constexpr int ID_CHK_STARTUP = 101;
     constexpr int ID_CHK_LAUNCH = 102;
-    constexpr int ID_CHK_HANDOFF = 103;
     constexpr int ID_LBL_STATUS = 104;
     constexpr int ID_BTN_INSTALL = 105;
     constexpr int ID_BTN_UNINSTALL = 106;
@@ -48,16 +47,6 @@ namespace
     std::wstring GetInstallVersionDir()
     {
         return GetInstallRootDir() + L"\\v" + WINRINGS_PRODUCT_VERSION_STR_W;
-    }
-
-    std::wstring GetBackupDir()
-    {
-        return GetInstallRootDir() + L"\\Backup";
-    }
-
-    std::wstring GetStartupClearTaskbarPath()
-    {
-        return GetEnvFolderPath(FOLDERID_Startup) + L"\\ClearTaskbar.exe";
     }
 
     std::wstring GetStartMenuShortcutPath()
@@ -202,102 +191,6 @@ namespace
         }
     }
 
-    struct ClosePidCtx
-    {
-        DWORD pid;
-    };
-
-    BOOL CALLBACK CloseProcessWindowProc(HWND hwnd, LPARAM lp)
-    {
-        const auto* ctx = reinterpret_cast<const ClosePidCtx*>(lp);
-        DWORD pid = 0;
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid == ctx->pid)
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
-        return TRUE;
-    }
-
-    void StopClearTaskbarPolitely()
-    {
-        std::vector<HANDLE> handles;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snap != INVALID_HANDLE_VALUE)
-        {
-            PROCESSENTRY32W pe{ sizeof(pe) };
-            for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
-            {
-                if (_wcsicmp(pe.szExeFile, L"ClearTaskbar.exe") == 0)
-                {
-                    ClosePidCtx ctx{ pe.th32ProcessID };
-                    EnumWindows(CloseProcessWindowProc, reinterpret_cast<LPARAM>(&ctx));
-                    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
-                    if (h)
-                        handles.push_back(h);
-                }
-            }
-            CloseHandle(snap);
-        }
-
-        for (HANDLE h : handles)
-        {
-            if (WaitForSingleObject(h, 2500) != WAIT_OBJECT_0)
-                TerminateProcess(h, 0);
-            CloseHandle(h);
-        }
-    }
-
-    bool HandoffClearTaskbarFromStartup(std::wstring& outNote)
-    {
-        const std::wstring startupExe = GetStartupClearTaskbarPath();
-        if (!FileExists(startupExe))
-        {
-            outNote = L"ClearTaskbar.exe was not in Startup.";
-            return true;
-        }
-
-        StopClearTaskbarPolitely();
-
-        const std::wstring backupDir = GetBackupDir();
-        SHCreateDirectoryExW(nullptr, backupDir.c_str(), nullptr);
-        const std::wstring backupExe = backupDir + L"\\ClearTaskbar.exe";
-
-        if (!CopyFileW(startupExe.c_str(), backupExe.c_str(), FALSE) || !FileExists(backupExe))
-        {
-            outNote = L"Could not back up ClearTaskbar.exe; Startup file left untouched.";
-            return false;
-        }
-
-        if (!DeleteFileW(startupExe.c_str()))
-        {
-            outNote = L"Backed up ClearTaskbar.exe, but could not remove Startup copy automatically.";
-            return false;
-        }
-
-        outNote = L"Backed up ClearTaskbar.exe to Backup folder and removed Startup entry (restored on uninstall).";
-        return true;
-    }
-
-    bool RestoreClearTaskbarToStartup(std::wstring& outNote)
-    {
-        const std::wstring backupExe = GetBackupDir() + L"\\ClearTaskbar.exe";
-        if (!FileExists(backupExe))
-            return true;
-
-        const std::wstring startupExe = GetStartupClearTaskbarPath();
-        if (!FileExists(startupExe))
-        {
-            if (CopyFileW(backupExe.c_str(), startupExe.c_str(), FALSE))
-            {
-                DeleteFileW(backupExe.c_str());
-                outNote = L"Restored ClearTaskbar.exe to Startup folder.";
-                return true;
-            }
-            outNote = L"Failed restoring ClearTaskbar.exe backup cleanly; backup kept at " + backupExe;
-            return false;
-        }
-        return true;
-    }
-
     bool CreateStartMenuShortcut(const std::wstring& targetExe)
     {
         ComPtr<IShellLinkW> link;
@@ -306,7 +199,7 @@ namespace
             return false;
 
         link->SetPath(targetExe.c_str());
-        link->SetDescription(L"WinRings Radial Switcher & Unified Top Bar");
+        link->SetDescription(L"WinRings Radial Switcher");
 
         ComPtr<IPersistFile> pf;
         if (FAILED(link.As(&pf)))
@@ -376,8 +269,7 @@ namespace
         return true;
     }
 
-    bool PerformInstall(HINSTANCE inst, bool addStartup, bool launchAfter,
-        bool handoffClearTaskbar, std::wstring& outMessage)
+    bool PerformInstall(HINSTANCE inst, bool addStartup, bool launchAfter, std::wstring& outMessage)
     {
         const std::wstring installDir = GetInstallVersionDir();
         SHCreateDirectoryExW(nullptr, installDir.c_str(), nullptr);
@@ -409,10 +301,6 @@ namespace
         RegDeleteTreeW(HKEY_CURRENT_USER, WINRINGS_HOST_SAFETY_REGISTRY_W);
         CreateStartMenuShortcut(installDir + L"\\" + WINRINGS_HOST_FILENAME_W);
 
-        std::wstring handoffNote;
-        if (handoffClearTaskbar)
-            HandoffClearTaskbarFromStartup(handoffNote);
-
         if (launchAfter)
         {
             const std::wstring hostExe = installDir + L"\\" + WINRINGS_HOST_FILENAME_W;
@@ -430,8 +318,6 @@ namespace
         }
 
         outMessage = L"Installed WinRings v" WINRINGS_PRODUCT_VERSION_STR_W L" to:\n" + installDir;
-        if (!handoffNote.empty())
-            outMessage += L"\n\n" + handoffNote;
         return true;
     }
 
@@ -450,9 +336,6 @@ namespace
         }
         RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WinRings");
         DeleteFileW(GetStartMenuShortcutPath().c_str());
-
-        std::wstring restoreNote;
-        RestoreClearTaskbarToStartup(restoreNote);
 
         bool scheduledRebootCleanup = false;
         const wchar_t* files[] = {
@@ -477,8 +360,6 @@ namespace
             MoveFileExW(installDir.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
 
         outMessage = L"WinRings has been uninstalled.";
-        if (!restoreNote.empty())
-            outMessage += L"\n" + restoreNote;
         if (scheduledRebootCleanup)
             outMessage += L"\nNote: WinRingsShell.dll remains mapped in Explorer until next Windows sign-out/restart and is scheduled for automatic cleanup.";
         return true;
@@ -492,7 +373,6 @@ namespace
         HFONT boldFont = nullptr;
         HWND chkStartup = nullptr;
         HWND chkLaunch = nullptr;
-        HWND chkHandoff = nullptr;
         HWND lblStatus = nullptr;
     };
 
@@ -538,14 +418,7 @@ namespace
             st->chkLaunch = mk(L"BUTTON", L"Launch WinRings immediately after installation", BS_AUTOCHECKBOX | WS_TABSTOP, 22, 122, 460, 24, ID_CHK_LAUNCH);
             SendMessageW(st->chkLaunch, BM_SETCHECK, BST_CHECKED, 0);
 
-            if (FileExists(GetStartupClearTaskbarPath()))
-            {
-                st->chkHandoff = mk(L"BUTTON",
-                    L"Back up & disable Startup ClearTaskbar.exe (restored on uninstall)",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 22, 152, 490, 24, ID_CHK_HANDOFF);
-            }
-
-            st->lblStatus = mk(L"STATIC", L"Ready. 100% pure native C++17 (x64).", 0, 22, 194, 490, 64, ID_LBL_STATUS);
+            st->lblStatus = mk(L"STATIC", L"Ready. 100% pure native C++17 (x64).", 0, 22, 166, 490, 64, ID_LBL_STATUS);
 
             mk(L"BUTTON", L"Install / Repair", BS_DEFPUSHBUTTON | WS_TABSTOP, 22, 274, 145, 32, ID_BTN_INSTALL);
             mk(L"BUTTON", L"Uninstall", WS_TABSTOP, 178, 274, 110, 32, ID_BTN_UNINSTALL);
@@ -577,9 +450,8 @@ namespace
             {
                 const bool addStartup = SendMessageW(st->chkStartup, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 const bool launch = SendMessageW(st->chkLaunch, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                const bool handoff = st->chkHandoff && (SendMessageW(st->chkHandoff, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 std::wstring statusMsg;
-                const bool ok = PerformInstall(st->instance, addStartup, launch, handoff, statusMsg);
+                const bool ok = PerformInstall(st->instance, addStartup, launch, statusMsg);
                 SetWindowTextW(st->lblStatus, statusMsg.c_str());
                 MessageBoxW(hwnd, statusMsg.c_str(), L"WinRings Setup",
                     ok ? (MB_ICONINFORMATION | MB_OK) : (MB_ICONERROR | MB_OK));
@@ -620,7 +492,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     bool flagRepair = false;
     bool flagUninstall = false;
     bool flagSilent = false;
-    bool flagHandoff = false;
     bool flagNoLaunch = false;
 
     if (argv)
@@ -632,7 +503,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
             else if (_wcsicmp(argv[i], L"--repair") == 0) flagRepair = true;
             else if (_wcsicmp(argv[i], L"--uninstall") == 0) flagUninstall = true;
             else if (_wcsicmp(argv[i], L"--silent") == 0) flagSilent = true;
-            else if (_wcsicmp(argv[i], L"--handoff-cleartaskbar") == 0) flagHandoff = true;
             else if (_wcsicmp(argv[i], L"--no-launch") == 0) flagNoLaunch = true;
         }
         LocalFree(argv);
@@ -656,7 +526,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (flagInstall || flagRepair)
     {
         std::wstring msg;
-        const bool ok = PerformInstall(instance, true, !flagNoLaunch, flagHandoff, msg);
+        const bool ok = PerformInstall(instance, true, !flagNoLaunch, msg);
         if (!flagSilent)
             MessageBoxW(nullptr, msg.c_str(), L"WinRings Setup", ok ? (MB_ICONINFORMATION | MB_OK) : (MB_ICONERROR | MB_OK));
         exitCode = ok ? 0 : 1;

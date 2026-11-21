@@ -477,6 +477,9 @@ namespace winrings
 
     Microsoft::WRL::ComPtr<IWICBitmapSource> WindowTracker::GetWindowIconBitmap(HWND hwnd, const std::wstring& exePath)
     {
+        if (!exePath.empty() && _wcsicmp(FileNameOf(exePath).c_str(), L"explorer.exe") == 0)
+            return GetShellIconBitmap(exePath);
+
         if (!exePath.empty())
         {
             const std::wstring cacheKey = L"win:" + ToLowerCopy(exePath);

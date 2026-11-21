@@ -362,6 +362,8 @@ namespace winrings
     {
         if (exePath.empty())
             return {};
+        if (_wcsicmp(FileNamePart(exePath).c_str(), L"explorer.exe") == 0)
+            return L"File Explorer";
 
         DWORD handle = 0;
         const DWORD sz = GetFileVersionInfoSizeW(exePath.c_str(), &handle);
@@ -403,6 +405,8 @@ namespace winrings
 
     std::wstring AppIndex::FindFriendlyNameForExe(const std::wstring& exePath) const
     {
+        if (_wcsicmp(FileNamePart(exePath).c_str(), L"explorer.exe") == 0)
+            return L"File Explorer";
         const std::wstring key = CanonicalPathKey(exePath);
         if (key.empty())
             return {};

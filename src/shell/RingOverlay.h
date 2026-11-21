@@ -32,7 +32,6 @@ namespace winrings
         {
             std::function<void(const std::wstring& exeArgs)> launchTools;
             std::function<void(const SwitcherConfig& updatedConfig)> saveAndReloadConfig;
-            std::function<void()> onToggleTopBarRequested;
             std::function<void()> onExitRequested;
             std::function<void()> onOverlayClosed;
         };
@@ -53,6 +52,7 @@ namespace winrings
         HWND Hwnd() const noexcept { return m_hwnd; }
         bool IsOpen() const noexcept { return m_isOpen; }
         bool IsLockedOpen() const noexcept { return m_isLockedOpen; }
+        bool IsDragOrReorderActive() const noexcept { return m_dragActive || m_draggingOutFromRing || m_reorderActive; }
         double DpiScale() const noexcept { return m_dpiScale; }
         bool IsPointInActiveBounds(POINT screenPt) const noexcept;
 
@@ -75,6 +75,14 @@ namespace winrings
             const RingSlot* subSlot = nullptr;
             double currentScale = 1.0;
             double targetScale = 1.0;
+        };
+
+        enum class PressKind
+        {
+            None,
+            CenterDeadzone,
+            RingSlot,
+            SubmenuCard
         };
 
         struct RankedMatch
@@ -121,8 +129,14 @@ namespace winrings
         void Render();
         void ActivateSlotOrWindow(const RingSlot* slot, const WindowEntry* win, bool shiftHeld);
         void ShowContextMenuAt(POINT screenPt);
-        void ShowDropActionsMenu(const std::vector<std::wstring>& files, POINT screenPt);
         std::wstring BuildFilterSummary() const;
+
+        int PinnedVisibleSlotCount() const noexcept;
+        void ResetDragSpringState() noexcept;
+        void CancelPendingPressAndReorder(bool revertVisualOrder);
+        void EnsureAnimTimerRunning();
+        bool CanSlotSpringLoad(const RingSlot& slot) const noexcept;
+        void TriggerSpringLoadForSlot(int slotIndex);
 
         void OnDragEnterOverlay();
         void OnDragOverOverlay(POINT screenPt);
@@ -207,7 +221,20 @@ namespace winrings
         bool m_isLockedOpen = false;
         bool m_contextMenuOpen = false;
         bool m_dragActive = false;
-        int m_dragHoverBadge = 0; // 0=none, 1=Convert, 2=Actions
+        bool m_dragOverCenter = false;
+        bool m_draggingOutFromRing = false;
+        PressKind m_pressKind = PressKind::None;
+        int m_pressSlotIndex = -1;
+        int m_pressSubIndex = -1;
+        POINT m_pressScreenPt{};
+        bool m_reorderActive = false;
+        int m_reorderFromIndex = -1;
+        int m_reorderCurrentIndex = -1;
+        PointD m_reorderCursorDip{};
+        int m_springSlotIndex = -1;
+        LONGLONG m_springHoverStartQpc = 0;
+        bool m_springTriggered = false;
+        double m_springPulseScale = 1.0;
         double m_openProgress = 1.0;
         LONGLONG m_openStartQpc = 0;
         LONGLONG m_qpcFreq = 1;

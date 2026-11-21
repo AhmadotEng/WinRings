@@ -2,6 +2,30 @@
 
 All notable changes to **WinRings** are documented in this file.
 
+## [v3.0.0] - 2026-11-22 (Release 3.0 — Pure Radial Switcher & Interactive Drag-and-Drop)
+
+### Added
+- **Spring-Loaded Hover-to-Open During Drag (`src/shared/SlotMatching.h`, `src/shell/RingOverlay.cpp`):** Holding a dragged file over any `App` or `Folder` slot for `500 ms` plays a `420 ms` **double-heartbeat scale animation** (`EvaluateSpringHover`) and brings that window forward (`pointerFollow = false`) while keeping your drag active so you can drop straight into the target window.
+- **Live Drag-to-Reorder Ring Icons (`src/shell/RingOverlay.cpp`, `src/shared/SlotMatching.h`):** In Sticky Mode, press and drag any pinned icon (`>= 6 DIP`) around the ring to reorder pinned slots interactively with an accent placeholder, floating cursor icon, `"Move: <Label>"` center pill, and automatic persistence to `%APPDATA%\WinRings\config.json` (`ComputeReorderTargetSlotIndex` / `ReorderVectorElement`).
+- **Folder Drop Copy (`src/shell/SlotModel.cpp`, `src/shell/RingOverlay.cpp`):** Dropping files onto any pinned `Folder` slot (such as `Downloads`) copies them into that folder via `SlotModel::CopyFilesToFolder` (`FO_COPY` with collision rename & undo).
+- **Full Inner-Hole `"Pin to Ring"` Center Drop Zone (`src/shell/RingOverlay.cpp`):** Expanded the center pinning drop radius cleanly across the open inner hole (`holeRadius - 4 DIP`) with an accent ring highlight for dropping files, folders, `.exe` apps, and `http(s)://` URLs.
+- **Slot Matching, Spring-Load & Reorder Math (`src/shared/SlotMatching.h`, `tests/WinRingsTests.cpp`):** Extracted pure testable helpers (`IsExplorerExecutablePath`, `ShouldShowSlotWindowPreview`, `ExplorerWindowMatchesFolder`, `ExplorerWindowMatchesRecycleBin`, `EvaluateSpringHover`, `ComputeReorderTargetSlotIndex`, `ReorderVectorElement`) and added unit tests (`TestSlotMatchingAndPreviews`, `TestDragSpringAndReorder`).
+
+### Removed
+- **Complete Taskbar Decoupling (`ClearTaskbar` Independence):** Removed all Windows taskbar hooks (`TopBarHook.h/.cpp`), XAML visual diagnostics (`XamlTaskbarCtrl.h/.cpp`), clock formatting (`ClockFormat.h`), `Inspect-TaskbarBuild.ps1`, COM exports (`DllGetClassObject`/`DllCanUnloadNow`), `--toggle-topbar`, the `Top Bar & Clock` Settings page, the `Top-Bar Ring Toggle Pill` option, and `ClearTaskbar.exe` Setup handoff logic. WinRings is now purely a Radial Switcher and runs cleanly alongside **A4S-Menu** and standalone **ClearTaskbar** (existing `config.json` files with legacy `topBar*` keys continue to load untouched).
+- **Floating Convert & Floating Actions Pills Removed Internally & Visually:** Deleted `DropNaming.h`, `DropActions.h/.cpp`, `CompressTrimDlg.h/.cpp`, and `RedactEditor.h/.cpp`; removed `ffmpegPath` from config & the `Advanced` Settings page; and removed `--convert`, `--compress`, `--trim`, `--redact`, and `--zip` from `WinRingsTools.exe` (`WinRingsTools.exe` reduced to `~396 KB`, `WinRingsSetup.exe` to `~1.42 MB`).
+
+### Bug Fixes
+- **Click-vs-Drag Differentiation (`src/shell/InputEngine.cpp`, `src/shell/RingOverlay.cpp`, `src/shell/DropTarget.cpp`):**
+  - Outside clicks now dismiss the ring only on a clean click-release (`WM_LBUTTONUP` without crossing `SM_CXDRAG`/`SM_CYDRAG`), preventing accidental dismissal when clicking-and-holding files outside the ring to drag them in.
+  - Summoning the ring while already holding `VK_LBUTTON` automatically locks it open for dropping.
+  - Added `WM_NCHITTEST` (`HTTRANSPARENT` outside active bounds) so transparent corners of the overlay never block dragging nearby desktop/Explorer files.
+  - Dragging items out of the `Downloads` fan-out arc now keeps the ring open behind the active OLE drag (`StartFileDragOut(nullptr, dragPath)`).
+- **File Explorer Icon & Label Corruption (`src/shell/WindowTracker.cpp`, `src/shell/AppIndex.cpp`, `src/shell/SlotModel.cpp`):** `explorer.exe` now always keeps its native File Explorer yellow folder icon and `"File Explorer"` label rather than caching folder-specific `WM_GETICON` icons (such as Downloads' green arrow) or Start Menu `.lnk` shortcut names (such as `"Windows Software..."`).
+- **Downloads & Recycle Bin Running Dots & Switching (`src/shell/SlotModel.cpp`, `src/shell/RingOverlay.cpp`):** Open Explorer windows for `Downloads` and `Recycle Bin` now illuminate their respective inner-rim running/frontmost dots and switch to the matching window when clicked, while restricting DWM PiP previews and numeric count badges strictly to `SlotKind::App` so `File Explorer` keeps all Explorer PiP previews and `Downloads`/`Recycle Bin` never show window previews.
+
+---
+
 ## [v2.5.0] - 2026-11-21 (Release 2.5 — Approved A4S Look)
 
 ### Visual & Material Architecture (Approved Default Look)

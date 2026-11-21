@@ -4,12 +4,11 @@
 #include <cstdio>
 #include <string>
 
-#include "../src/shared/ClockFormat.h"
 #include "../src/shared/CrashGuard.h"
-#include "../src/shared/DropNaming.h"
 #include "../src/shared/RadialMath.h"
 #include "../src/shared/RingThemeEngine.h"
 #include "../src/shared/SearchMatch.h"
+#include "../src/shared/SlotMatching.h"
 #include "../src/shared/WinRingsConfig.h"
 
 using namespace winrings;
@@ -444,42 +443,6 @@ static void TestDownloadsAndSubmenuHoverTransitions()
     }
 }
 
-static void TestClockFormat()
-{
-    SYSTEMTIME st{};
-    st.wYear = 2026;
-    st.wMonth = 11;
-    st.wDay = 20; // Friday
-    st.wHour = 16;
-    st.wMinute = 2;
-    st.wSecond = 9;
-
-    const std::wstring compact = FormatClock(st, L"ddd d MMM  h:mm tt", ClockCasing::CompactLower);
-    CHECK(compact == L"Fri 20 Nov  4:02 pm");
-
-    const std::wstring exact = FormatClock(st, L"ddd d MMM  h:mm tt", ClockCasing::Exact);
-    CHECK(exact == L"Fri 20 Nov  4:02 PM");
-
-    const std::wstring upper = FormatClock(st, L"dddd dd MMMM HH:mm:ss", ClockCasing::Upper);
-    CHECK(upper == L"FRIDAY 20 NOVEMBER 16:02:09");
-
-    SYSTEMTIME midnight{};
-    midnight.wYear = 2026;
-    midnight.wMonth = 1;
-    midnight.wDay = 5; // Monday
-    midnight.wHour = 0;
-    midnight.wMinute = 7;
-    CHECK(FormatClock(midnight, L"ddd d MMM  h:mm tt", ClockCasing::CompactLower) == L"Mon 5 Jan  12:07 am");
-
-    SYSTEMTIME noon{};
-    noon.wYear = 2026;
-    noon.wMonth = 6;
-    noon.wDay = 15;
-    noon.wHour = 12;
-    noon.wMinute = 0;
-    CHECK(FormatClock(noon, L"h:mm tt", ClockCasing::CompactLower) == L"12:00 pm");
-}
-
 static void TestCrashGuard()
 {
     CrashGuardState s{};
@@ -514,7 +477,7 @@ static void TestSearchScoring()
     CHECK(ScoreAliases(heliumAliases, L"nomatch") == -1);
 }
 
-static void TestConfigRoundTripAndDropNaming()
+static void TestConfigRoundTrip()
 {
     wchar_t tempDir[MAX_PATH]{};
     GetTempPathW(_countof(tempDir), tempDir);
@@ -537,9 +500,6 @@ static void TestConfigRoundTripAndDropNaming()
     CHECK(loadedDefault.lightDarkMode == 0);
 
     orig.mouseTrigger = MouseTriggerButton::Middle;
-    orig.topBarHeightDip = 32;
-    orig.topBarClockFormat = L"ddd d MMM  h:mm tt";
-    orig.topBarClockCasing = ClockCasing::CompactLower;
     orig.theme = RingTheme::DarkWood;
     orig.glassLevel = 86;
     orig.lightDarkMode = 15;
@@ -555,9 +515,6 @@ static void TestConfigRoundTripAndDropNaming()
     SwitcherConfig loaded;
     CHECK(SwitcherConfig::LoadFromFile(cfgPath, loaded));
     CHECK(loaded.mouseTrigger == MouseTriggerButton::Middle);
-    CHECK(loaded.topBarHeightDip == 32);
-    CHECK(loaded.topBarClockFormat == L"ddd d MMM  h:mm tt");
-    CHECK(loaded.topBarClockCasing == ClockCasing::CompactLower);
     CHECK(loaded.theme == RingTheme::DarkWood);
     CHECK(loaded.glassLevel == 86);
     CHECK(loaded.lightDarkMode == 15);
@@ -601,21 +558,6 @@ static void TestConfigRoundTripAndDropNaming()
     SwitcherConfig bad;
     CHECK(!SwitcherConfig::ParseJsonUtf8("{ not valid json", bad));
 
-    const std::wstring srcFile = testDir + L"\\photo.png";
-    HANDLE h = CreateFileW(srcFile.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    CHECK(h != INVALID_HANDLE_VALUE);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-
-    const std::wstring out1 = BuildNonDestructiveOutputPath(srcFile, L"converted", L".jpg");
-    CHECK(out1 == testDir + L"\\photo (converted).jpg");
-    h = CreateFileW(out1.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-
-    const std::wstring out2 = BuildNonDestructiveOutputPath(srcFile, L"converted", L".jpg");
-    CHECK(out2 == testDir + L"\\photo (converted 2).jpg");
-
-    DeleteFileW(out1.c_str());
-    DeleteFileW(srcFile.c_str());
     DeleteFileW(cfgPath.c_str());
     RemoveDirectoryW(testDir.c_str());
 }
@@ -680,15 +622,96 @@ static void TestThemeMaterialEngine()
     CHECK(maxLuma > minLuma + 80);
 }
 
+static void TestSlotMatchingAndPreviews()
+{
+    CHECK(IsExplorerExecutablePath(L"C:\\Windows\\explorer.exe"));
+    CHECK(IsExplorerExecutablePath(L"C:/Windows/Explorer.EXE"));
+    CHECK(IsExplorerExecutablePath(L"explorer.exe"));
+    CHECK(!IsExplorerExecutablePath(L"C:\\Windows\\notepad.exe"));
+    CHECK(!IsExplorerExecutablePath(L""));
+
+    // Folder matching against Explorer window titles (leaf name, suffix strip, full path, negative cases)
+    const std::wstring dlPath = L"C:\\Users\\Administrator\\Downloads";
+    CHECK(ExplorerWindowMatchesFolder(L"Downloads - File Explorer", dlPath));
+    CHECK(ExplorerWindowMatchesFolder(L"downloads - file explorer", dlPath + L"\\"));
+    CHECK(ExplorerWindowMatchesFolder(L"Downloads", dlPath));
+    CHECK(ExplorerWindowMatchesFolder(L"C:\\Users\\Administrator\\Downloads - File Explorer", L"C:/Users/Administrator/Downloads/"));
+    CHECK(!ExplorerWindowMatchesFolder(L"Documents - File Explorer", dlPath));
+    CHECK(!ExplorerWindowMatchesFolder(L"This PC - File Explorer", dlPath));
+    CHECK(!ExplorerWindowMatchesFolder(L"Recycle Bin - File Explorer", dlPath));
+    CHECK(!ExplorerWindowMatchesFolder(L"C:", L"C:\\"));
+    CHECK(ExplorerWindowMatchesFolder(L"C:\\ - File Explorer", L"C:\\"));
+
+    // Recycle Bin matching
+    CHECK(ExplorerWindowMatchesRecycleBin(L"Recycle Bin - File Explorer"));
+    CHECK(ExplorerWindowMatchesRecycleBin(L"recycle bin"));
+    CHECK(ExplorerWindowMatchesRecycleBin(L"Corbeille - File Explorer", L"Corbeille"));
+    CHECK(!ExplorerWindowMatchesRecycleBin(L"Downloads - File Explorer"));
+    CHECK(!ExplorerWindowMatchesRecycleBin(L""));
+
+    // Window PiP previews: App only; Folder and RecycleBin must never open DWM window previews
+    CHECK(ShouldShowSlotWindowPreview(SlotKind::App, 1, true));
+    CHECK(!ShouldShowSlotWindowPreview(SlotKind::App, 1, false));
+    CHECK(ShouldShowSlotWindowPreview(SlotKind::App, 2, false));
+    CHECK(!ShouldShowSlotWindowPreview(SlotKind::Folder, 1, true));
+    CHECK(!ShouldShowSlotWindowPreview(SlotKind::Folder, 3, false));
+    CHECK(!ShouldShowSlotWindowPreview(SlotKind::RecycleBin, 1, true));
+    CHECK(!ShouldShowSlotWindowPreview(SlotKind::RecycleBin, 3, false));
+}
+
+static void TestDragSpringAndReorder()
+{
+    // Spring-loaded double-heartbeat timing: 500ms dwell + 420ms two-beat pulse + trigger
+    const auto s0 = EvaluateSpringHover(0.0);
+    CHECK(std::abs(s0.scaleMultiplier - 1.0) < 1e-6 && !s0.pulsing && !s0.shouldActivate);
+    const auto s250 = EvaluateSpringHover(250.0);
+    CHECK(std::abs(s250.scaleMultiplier - 1.0) < 1e-6 && !s250.pulsing && !s250.shouldActivate);
+    const auto s499 = EvaluateSpringHover(499.0);
+    CHECK(std::abs(s499.scaleMultiplier - 1.0) < 1e-6 && !s499.pulsing && !s499.shouldActivate);
+
+    const auto b1Peak = EvaluateSpringHover(552.5);
+    CHECK(b1Peak.pulsing && !b1Peak.shouldActivate && b1Peak.scaleMultiplier > 1.18);
+    const auto b1Dip = EvaluateSpringHover(657.5);
+    CHECK(b1Dip.pulsing && !b1Dip.shouldActivate && b1Dip.scaleMultiplier < 0.92);
+    const auto b2Peak = EvaluateSpringHover(762.5);
+    CHECK(b2Peak.pulsing && !b2Peak.shouldActivate && b2Peak.scaleMultiplier > 1.18);
+    const auto b2Dip = EvaluateSpringHover(867.5);
+    CHECK(b2Dip.pulsing && !b2Dip.shouldActivate && b2Dip.scaleMultiplier < 0.92);
+
+    const auto trigger = EvaluateSpringHover(920.0);
+    CHECK(!trigger.pulsing && trigger.shouldActivate && std::abs(trigger.scaleMultiplier - 1.0) < 1e-6);
+
+    // Reorder target computation (8 slots total, 5 pinned)
+    CHECK(ComputeReorderTargetSlotIndex(0.0, -90.0, 5, 8) == 0);   // 12 o'clock -> slot 0
+    CHECK(ComputeReorderTargetSlotIndex(90.0, 0.0, 5, 8) == 2);    // 3 o'clock -> slot 2
+    CHECK(ComputeReorderTargetSlotIndex(0.0, 90.0, 5, 8) == 4);    // 6 o'clock -> slot 4
+    CHECK(ComputeReorderTargetSlotIndex(-90.0, 0.0, 5, 8) == 4);   // 9 o'clock (slot 6) clamped to pinnedCount - 1 (4)
+    CHECK(ComputeReorderTargetSlotIndex(90.0, 0.0, 1, 8) == 0);    // <=1 pinned -> 0
+
+    // Reorder vector element forward, backward, and no-op
+    std::vector<int> v1{ 10, 20, 30, 40, 50 };
+    ReorderVectorElement(v1, 0, 3);
+    CHECK((v1 == std::vector<int>{ 20, 30, 40, 10, 50 }));
+
+    std::vector<int> v2{ 10, 20, 30, 40, 50 };
+    ReorderVectorElement(v2, 4, 1);
+    CHECK((v2 == std::vector<int>{ 10, 50, 20, 30, 40 }));
+
+    std::vector<int> v3{ 10, 20, 30, 40, 50 };
+    ReorderVectorElement(v3, 2, 2);
+    CHECK((v3 == std::vector<int>{ 10, 20, 30, 40, 50 }));
+}
+
 int wmain()
 {
     TestRadialMath();
     TestDownloadsAndSubmenuHoverTransitions();
     TestSearchScoring();
-    TestClockFormat();
     TestCrashGuard();
-    TestConfigRoundTripAndDropNaming();
+    TestConfigRoundTrip();
     TestThemeMaterialEngine();
+    TestSlotMatchingAndPreviews();
+    TestDragSpringAndReorder();
 
     if (g_failures == 0)
     {

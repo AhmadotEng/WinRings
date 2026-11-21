@@ -21,9 +21,7 @@
 #include "InputEngine.h"
 #include "RingOverlay.h"
 #include "SlotModel.h"
-#include "TopBarHook.h"
 #include "WindowTracker.h"
-#include "XamlTaskbarCtrl.h"
 
 namespace winrings
 {
@@ -86,10 +84,6 @@ namespace winrings
     {
         constexpr UINT_PTR kWatchdogTimerId = 1;
         constexpr UINT kWatchdogIntervalMs = 1000;
-        constexpr UINT_PTR kTopBarRetryTimerId = 2;
-        constexpr UINT kMsgXamlFirstAttached = WM_APP + 300;
-
-        constexpr wchar_t kRingPillClassW[] = L"WinRings.TopBarPill.v1";
         constexpr wchar_t kPreviewControlClassW[] = L"WinRings.Preview.Control.v1";
 
         bool IsCurrentProcessExplorer() noexcept
@@ -219,8 +213,7 @@ namespace winrings
                     DispatchMessageW(&msg);
                 }
 
-                Disarm(false, false);
-                DestroyPillWindow();
+                Disarm(false);
                 if (m_controlHwnd && IsWindow(m_controlHwnd))
                 {
                     DestroyWindow(m_controlHwnd);
@@ -250,32 +243,6 @@ namespace winrings
                 return DefWindowProcW(hwnd, msg, wp, lp);
             }
 
-            static LRESULT CALLBACK PillWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept
-            {
-                auto* self = reinterpret_cast<ControllerRuntime*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-                if (msg == WM_NCCREATE)
-                {
-                    self = static_cast<ControllerRuntime*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-                }
-                if (self)
-                {
-                    if (msg == WM_MOUSEACTIVATE)
-                        return MA_NOACTIVATE;
-                    if (msg == WM_LBUTTONUP)
-                    {
-                        self->ToggleStickyRing();
-                        return 0;
-                    }
-                    if (msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED)
-                    {
-                        self->UpdatePillWindow();
-                        return 0;
-                    }
-                }
-                return DefWindowProcW(hwnd, msg, wp, lp);
-            }
-
             LRESULT HandleControlMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 if (msg == m_shellHookMessage)
@@ -295,7 +262,7 @@ namespace winrings
                         return TRUE;
 
                     case WINRINGS_CMD_EXIT:
-                        Disarm(true, true);
+                        Disarm(true);
                         return TRUE;
 
                     case WINRINGS_CMD_SUSPEND_INPUT:
@@ -313,12 +280,8 @@ namespace winrings
                         ReloadConfiguration();
                         return TRUE;
 
-                    case WINRINGS_CMD_TOGGLE_TOPBAR:
-                        ToggleTopBar();
-                        return TRUE;
-
                     case WINRINGS_CMD_QUERY_SHELL_STATE:
-                        return static_cast<LRESULT>(QueryShellStateBits());
+                        return static_cast<LRESULT>(m_armed ? WINRINGS_STATE_RING_READY : 0u);
 
                     case WINRINGS_CMD_REATTACH:
                         HandleReattach(reinterpret_cast<HWND>(lp));
@@ -329,9 +292,8 @@ namespace winrings
                     }
                 }
 
-                switch (msg)
+                if (msg == WM_TIMER)
                 {
-                case WM_TIMER:
                     if (wp == 9001)
                     {
                         if (m_armed)
@@ -343,37 +305,6 @@ namespace winrings
                         CheckHostWatchdog();
                         return 0;
                     }
-                    if (wp == kTopBarRetryTimerId && !m_previewMode)
-                    {
-                        ApplyTopBarState(false);
-                        if (XamlTaskbarCtrl::IsAttached() &&
-                            (!TopBarHook::IsHooked() || m_topBarHookAppliedGen == m_topBarDesiredGen))
-                        {
-                            KillTimer(hwnd, kTopBarRetryTimerId);
-                        }
-                        return 0;
-                    }
-                    break;
-
-                case kMsgXamlFirstAttached:
-                    if (m_armed && !m_previewMode)
-                    {
-                        ShellDiagLog(L"ShellCtrl", L"Received kMsgXamlFirstAttached -> forcing TopBar sync");
-                        ApplyTopBarState(true);
-                    }
-                    return 0;
-
-                case WM_DISPLAYCHANGE:
-                case WM_SETTINGCHANGE:
-                    if (m_armed && !m_previewMode && m_config.topBarEnabled)
-                    {
-                        ApplyTopBarState(true);
-                        UpdatePillWindow();
-                    }
-                    return 0;
-
-                default:
-                    break;
                 }
                 return DefWindowProcW(hwnd, msg, wp, lp);
             }
@@ -434,7 +365,7 @@ namespace winrings
                     hostGone = true;
 
                 if (hostGone)
-                    Disarm(true, false);
+                    Disarm(false);
             }
 
             void Arm(bool forPreview)
@@ -453,9 +384,6 @@ namespace winrings
                     updated.Save();
                     m_config = updated;
                     ApplyLoadedConfig();
-                };
-                overlayCb.onToggleTopBarRequested = [this]() {
-                    ToggleTopBar();
                 };
                 overlayCb.onExitRequested = [this]() {
                     if (m_previewMode)
@@ -483,6 +411,7 @@ namespace winrings
                 InputEngine::Callbacks inputCb{};
                 inputCb.isRingOpen = [this]() { return m_overlay.IsOpen(); };
                 inputCb.isRingLockedOpen = [this]() { return m_overlay.IsLockedOpen(); };
+                inputCb.isRingDragActive = [this]() { return m_overlay.IsDragOrReorderActive(); };
                 inputCb.isPointInOverlay = [this](POINT pt) { return m_overlay.IsPointInActiveBounds(pt); };
                 inputCb.getOverlayDpiScale = [this]() { return m_overlay.DpiScale(); };
                 inputCb.onTriggerPressed = [this](int x, int y) {
@@ -551,7 +480,6 @@ namespace winrings
                         m_overlay.BackspaceFilter();
                 };
                 inputCb.onUserPointerDelta = [this]() {
-                    // Pointer glide monitors actual cursor delta every 10ms tick; kept for symmetry.
                 };
 
                 m_input.Install(m_config, std::move(inputCb));
@@ -560,28 +488,13 @@ namespace winrings
 
                 if (!forPreview)
                 {
-                    const bool hookOk = m_config.topBarEnabled ? TopBarHook::Install() : false;
-                    ShellDiagLog(L"ShellCtrl",
-                        L"Arm: topBarEnabled=%d dockTop=%d heightDip=%d hideApps=%d backdrop=%s clock1L=%d hookInstall=%d",
-                        m_config.topBarEnabled ? 1 : 0, m_config.topBarDockTop ? 1 : 0,
-                        m_config.topBarHeightDip, m_config.topBarHideAppButtons ? 1 : 0,
-                        ToString(m_config.topBarBackdrop), m_config.topBarClockSingleLine ? 1 : 0,
-                        hookOk ? 1 : 0);
-
-                    HWND ctrlHwnd = m_controlHwnd;
-                    XamlTaskbarCtrl::StartAttachment(m_shellModule, m_config, [ctrlHwnd]() {
-                        if (ctrlHwnd && IsWindow(ctrlHwnd))
-                            PostMessageW(ctrlHwnd, kMsgXamlFirstAttached, 0, 0);
-                    });
-                    ++m_topBarDesiredGen;
-                    SetTimer(m_controlHwnd, kTopBarRetryTimerId, 1000, nullptr);
-                    ApplyTopBarState(true);
-                    UpdatePillWindow();
+                    ShellDiagLog(L"ShellCtrl", L"Arm: Radial Switcher ready (theme=%s glass=%d tone=%d)",
+                        ToString(m_config.theme), m_config.glassLevel, m_config.lightDarkMode);
                     PostStatusToHost(WINRINGS_DLL_STATUS_READY);
                 }
             }
 
-            void Disarm(bool restoreTopBar, bool notifyHost)
+            void Disarm(bool notifyHost)
             {
                 if (!m_armed)
                 {
@@ -590,32 +503,15 @@ namespace winrings
                     return;
                 }
 
-                ShellDiagLog(L"ShellCtrl", L"Disarm(restoreTopBar=%d notifyHost=%d)",
-                    restoreTopBar ? 1 : 0, notifyHost ? 1 : 0);
-
-                if (m_controlHwnd && !m_previewMode)
-                    KillTimer(m_controlHwnd, kTopBarRetryTimerId);
+                ShellDiagLog(L"ShellCtrl", L"Disarm(notifyHost=%d)", notifyHost ? 1 : 0);
 
                 m_armed = false;
-                m_topBarHookAppliedGen = 0;
                 m_input.Uninstall();
                 if (m_overlay.IsOpen())
                     m_overlay.Dismiss();
                 m_overlay.Shutdown();
                 m_appIndex.Shutdown();
                 m_tracker.Shutdown();
-                DestroyPillWindow();
-
-                if (restoreTopBar && !m_previewMode)
-                {
-                    XamlTaskbarCtrl::RestoreAll();
-                    HMODULE shellMod = m_shellModule;
-                    TopBarHook::RestoreAndUnhook([shellMod](std::function<void()> fn) {
-                        if (XamlTaskbarCtrl::RunOnUiThread(fn, 1500))
-                            return true;
-                        return TopBarHook::RunOnPrimaryTaskbarThread(shellMod, std::move(fn), 1500);
-                    });
-                }
 
                 if (notifyHost && !m_previewMode)
                     PostStatusToHost(WINRINGS_DLL_STATUS_DISARMED);
@@ -623,7 +519,7 @@ namespace winrings
 
             void HandleReattach(HWND newHostWindow)
             {
-                Disarm(true, false);
+                Disarm(false);
                 AcquireHostHandshake(newHostWindow);
                 Arm(false);
             }
@@ -657,22 +553,8 @@ namespace winrings
                 if (!m_armed)
                     return;
                 m_config = SwitcherConfig::LoadOrCreate();
-                ShellDiagLog(L"ShellCtrl", L"ReloadConfiguration: topBarEnabled=%d dockTop=%d heightDip=%d backdrop=%s",
-                    m_config.topBarEnabled ? 1 : 0, m_config.topBarDockTop ? 1 : 0,
-                    m_config.topBarHeightDip, ToString(m_config.topBarBackdrop));
-                ApplyLoadedConfig();
-            }
-
-            void ToggleTopBar()
-            {
-                if (!m_armed)
-                    return;
-                const bool prev = m_config.topBarEnabled;
-                m_config.topBarEnabled = !m_config.topBarEnabled;
-                const bool saved = m_config.Save();
-                ShellDiagLog(L"ShellCtrl", L"ToggleTopBar: %d -> %d (saved=%d xamlAttached=%d hooked=%d)",
-                    prev ? 1 : 0, m_config.topBarEnabled ? 1 : 0, saved ? 1 : 0,
-                    XamlTaskbarCtrl::IsAttached() ? 1 : 0, TopBarHook::IsHooked() ? 1 : 0);
+                ShellDiagLog(L"ShellCtrl", L"ReloadConfiguration: theme=%s glass=%d tone=%d",
+                    ToString(m_config.theme), m_config.glassLevel, m_config.lightDarkMode);
                 ApplyLoadedConfig();
             }
 
@@ -680,211 +562,6 @@ namespace winrings
             {
                 m_overlay.SetConfig(m_config);
                 m_input.UpdateConfig(m_config);
-                if (!m_previewMode)
-                {
-                    ++m_topBarDesiredGen;
-                    if (m_config.topBarEnabled && !TopBarHook::IsHooked())
-                        TopBarHook::Install();
-                    ApplyTopBarState(true);
-                    UpdatePillWindow();
-                }
-            }
-
-            void ApplyTopBarState(bool forceHookReapply)
-            {
-                if (m_previewMode)
-                    return;
-
-                XamlTaskbarCtrl::ApplyConfig(m_config);
-                if (!XamlTaskbarCtrl::IsAttached())
-                    XamlTaskbarCtrl::EnsureAttachRetry(m_shellModule, m_config);
-
-                if (m_config.topBarEnabled && !TopBarHook::IsHooked())
-                    TopBarHook::Install();
-
-                if (TopBarHook::IsHooked() && (forceHookReapply || m_topBarHookAppliedGen != m_topBarDesiredGen))
-                {
-                    const bool en = m_config.topBarEnabled;
-                    const bool top = m_config.topBarDockTop;
-                    const int h = m_config.topBarHeightDip;
-                    const bool allMon = m_config.topBarAllMonitors;
-                    auto applied = std::make_shared<std::atomic<bool>>(false);
-                    auto applyFn = [en, top, h, allMon, applied]() {
-                        if (TopBarHook::ApplyOnTaskbarUiThread(en, top, h, allMon))
-                            applied->store(true, std::memory_order_release);
-                    };
-
-                    const wchar_t* dispatchVia = L"Failed";
-                    bool dispatched = false;
-                    if (XamlTaskbarCtrl::RunOnUiThread(applyFn, 1500))
-                    {
-                        dispatched = true;
-                        dispatchVia = L"XamlUiThread";
-                    }
-                    else if (TopBarHook::RunOnPrimaryTaskbarThread(m_shellModule, applyFn, 1500))
-                    {
-                        dispatched = true;
-                        dispatchVia = L"TrayThreadFallback";
-                    }
-
-                    const bool appliedOk = dispatched && applied->load(std::memory_order_acquire);
-                    ShellDiagLog(L"ShellCtrl",
-                        L"ApplyTopBarState: en=%d top=%d h=%d xamlAttached=%d dispatch=%s applied=%d",
-                        en ? 1 : 0, top ? 1 : 0, h, XamlTaskbarCtrl::IsAttached() ? 1 : 0, dispatchVia,
-                        appliedOk ? 1 : 0);
-
-                    if (appliedOk)
-                        m_topBarHookAppliedGen = m_topBarDesiredGen;
-                }
-
-                if (!XamlTaskbarCtrl::IsAttached() ||
-                    (TopBarHook::IsHooked() && m_topBarHookAppliedGen != m_topBarDesiredGen))
-                {
-                    SetTimer(m_controlHwnd, kTopBarRetryTimerId, 1000, nullptr);
-                }
-            }
-
-            UINT32 QueryShellStateBits() const noexcept
-            {
-                UINT32 bits = 0;
-                if (m_armed)
-                    bits |= WINRINGS_STATE_RING_READY;
-                bits |= XamlTaskbarCtrl::GetStateBits();
-                if (TopBarHook::IsHooked())
-                    bits |= WINRINGS_STATE_TOPBAR_HOOKED;
-                return bits;
-            }
-
-            void UpdatePillWindow()
-            {
-                if (!m_armed || !m_config.topBarRingButton)
-                {
-                    DestroyPillWindow();
-                    return;
-                }
-
-                if (!m_pillHwnd)
-                {
-                    WNDCLASSEXW wc{ sizeof(wc) };
-                    wc.lpfnWndProc = PillWndProc;
-                    wc.hInstance = m_shellModule;
-                    wc.hCursor = LoadCursorW(nullptr, IDC_HAND);
-                    wc.lpszClassName = kRingPillClassW;
-                    RegisterClassExW(&wc);
-
-                    m_pillHwnd = CreateWindowExW(
-                        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-                        kRingPillClassW,
-                        L"WinRings",
-                        WS_POPUP,
-                        0, 0, 26, 20,
-                        nullptr, nullptr, m_shellModule, this);
-                }
-                if (!m_pillHwnd)
-                    return;
-
-                HMONITOR primary = MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
-                MONITORINFO mi{ sizeof(mi) };
-                GetMonitorInfoW(primary, &mi);
-                const UINT dpi = GetDpiForWindow(m_pillHwnd) >= 72 ? GetDpiForWindow(m_pillHwnd) : 96;
-                const int w = MulDiv(26, static_cast<int>(dpi), 96);
-                const int h = MulDiv(20, static_cast<int>(dpi), 96);
-                const int padX = MulDiv(8, static_cast<int>(dpi), 96);
-                const int barH = MulDiv(m_config.topBarEnabled ? m_config.topBarHeightDip : 48, static_cast<int>(dpi), 96);
-                const int posX = mi.rcMonitor.left + padX;
-                const int posY = (m_config.topBarEnabled && m_config.topBarDockTop)
-                    ? (mi.rcMonitor.top + (std::max)(2, (barH - h) / 2))
-                    : (mi.rcMonitor.bottom - barH + (std::max)(2, (barH - h) / 2));
-
-                // Render a crisp 32bpp premultiplied pill with concentric ring icon
-                BITMAPINFO bmi{};
-                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = w;
-                bmi.bmiHeader.biHeight = -h;
-                bmi.bmiHeader.biPlanes = 1;
-                bmi.bmiHeader.biBitCount = 32;
-                bmi.bmiHeader.biCompression = BI_RGB;
-                void* bits = nullptr;
-                HDC screenDc = GetDC(nullptr);
-                HDC memDc = CreateCompatibleDC(screenDc);
-                HBITMAP dib = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-                if (dib && bits)
-                {
-                    HGDIOBJ old = SelectObject(memDc, dib);
-                    auto* px = static_cast<UINT32*>(bits);
-                    const double cx = w * 0.5;
-                    const double cy = h * 0.5;
-                    const double outerR = (std::min)(w, h) * 0.34;
-                    const double innerR = outerR * 0.48;
-                    for (int y = 0; y < h; ++y)
-                    {
-                        for (int x = 0; x < w; ++x)
-                        {
-                            const double dx = (x + 0.5) - cx;
-                            const double dy = (y + 0.5) - cy;
-                            const double r = std::hypot(dx, dy);
-                            // Rounded pill alpha
-                            const double rx = (w * 0.5) - 1.0;
-                            const double ry = (h * 0.5) - 1.0;
-                            const double nx = (std::max)(0.0, std::abs(dx) - (rx - ry));
-                            const double pillDist = std::hypot(nx, dy) - ry;
-                            double bgA = (std::clamp)(0.5 - pillDist, 0.0, 1.0);
-                            double rC = 22.0, gC = 28.0, bC = 38.0;
-                            double outA = bgA * 0.80;
-
-                            // Crisp ring stroke
-                            const double ringDist = std::abs(r - outerR);
-                            const double ringCov = (std::clamp)(1.2 - ringDist, 0.0, 1.0);
-                            if (ringCov > 0.0)
-                            {
-                                rC = rC * (1.0 - ringCov) + 120.0 * ringCov;
-                                gC = gC * (1.0 - ringCov) + 190.0 * ringCov;
-                                bC = bC * (1.0 - ringCov) + 255.0 * ringCov;
-                                outA = (std::max)(outA, ringCov * 0.95);
-                            }
-                            const double dotDist = r - innerR * 0.55;
-                            const double dotCov = (std::clamp)(0.6 - dotDist, 0.0, 1.0);
-                            if (dotCov > 0.0)
-                            {
-                                rC = rC * (1.0 - dotCov) + 240.0 * dotCov;
-                                gC = gC * (1.0 - dotCov) + 246.0 * dotCov;
-                                bC = bC * (1.0 - dotCov) + 255.0 * dotCov;
-                                outA = (std::max)(outA, dotCov * 0.95);
-                            }
-
-                            const BYTE a = static_cast<BYTE>((std::clamp)(outA * 255.0, 0.0, 255.0));
-                            const BYTE pr = static_cast<BYTE>((std::clamp)(rC * (a / 255.0), 0.0, 255.0));
-                            const BYTE pg = static_cast<BYTE>((std::clamp)(gC * (a / 255.0), 0.0, 255.0));
-                            const BYTE pb = static_cast<BYTE>((std::clamp)(bC * (a / 255.0), 0.0, 255.0));
-                            px[y * w + x] = (static_cast<UINT32>(a) << 24) |
-                                (static_cast<UINT32>(pr) << 16) |
-                                (static_cast<UINT32>(pg) << 8) |
-                                static_cast<UINT32>(pb);
-                        }
-                    }
-
-                    POINT ptDst{ posX, posY };
-                    SIZE sz{ w, h };
-                    POINT ptSrc{ 0, 0 };
-                    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-                    UpdateLayeredWindow(m_pillHwnd, screenDc, &ptDst, &sz, memDc, &ptSrc, 0, &bf, ULW_ALPHA);
-                    SelectObject(memDc, old);
-                    DeleteObject(dib);
-                }
-                DeleteDC(memDc);
-                ReleaseDC(nullptr, screenDc);
-
-                SetWindowPos(m_pillHwnd, HWND_TOPMOST, posX, posY, w, h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            }
-
-            void DestroyPillWindow() noexcept
-            {
-                if (m_pillHwnd && IsWindow(m_pillHwnd))
-                {
-                    DestroyWindow(m_pillHwnd);
-                    m_pillHwnd = nullptr;
-                }
             }
 
             HMODULE m_shellModule = nullptr;
@@ -892,7 +569,6 @@ namespace winrings
             bool m_armed = false;
 
             HWND m_controlHwnd = nullptr;
-            HWND m_pillHwnd = nullptr;
             HWND m_hostWindow = nullptr;
             HANDLE m_hostProcess = nullptr;
             UINT_PTR m_attemptCookie = 0;
@@ -900,8 +576,6 @@ namespace winrings
             UINT m_statusMessage = 0;
             UINT m_commandMessage = 0;
             UINT m_shellHookMessage = 0;
-            uint64_t m_topBarDesiredGen = 0;
-            uint64_t m_topBarHookAppliedGen = 0;
 
             SwitcherConfig m_config;
             AppIndex m_appIndex;
@@ -928,7 +602,7 @@ namespace winrings
         if (g_explorerStarted.exchange(true, std::memory_order_acq_rel))
             return;
 
-        // Pin WinRingsShell.dll inside explorer.exe for its lifetime; --exit only disarms/restores.
+        // Pin WinRingsShell.dll inside explorer.exe for its lifetime; --exit only disarms.
         HMODULE pinned = nullptr;
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,

@@ -1,5 +1,6 @@
 #include "InputEngine.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace winrings
@@ -65,6 +66,8 @@ namespace winrings
         m_mouseTrigger = false;
         m_rightButtonDown = false;
         m_chordActive = false;
+        m_outsideClickPending = false;
+        m_outsideClickOrigin = {};
         m_lastTapQpc = 0;
     }
 
@@ -288,6 +291,15 @@ namespace winrings
 
         if (msg == WM_MOUSEMOVE)
         {
+            if (m_outsideClickPending)
+            {
+                const int dragThresh = (std::max)(5, (std::max)(GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)));
+                if (std::abs(ms->pt.x - m_outsideClickOrigin.x) >= dragThresh ||
+                    std::abs(ms->pt.y - m_outsideClickOrigin.y) >= dragThresh)
+                {
+                    m_outsideClickPending = false;
+                }
+            }
             if ((ms->flags & LLMHF_INJECTED) == 0 && m_callbacks.onUserPointerDelta)
                 m_callbacks.onUserPointerDelta();
             if (ringOpen || m_triggerHeld)
@@ -355,11 +367,27 @@ namespace winrings
             }
         }
 
-        // Click outside the overlay in sticky mode cancels cleanly
+        // Click outside the overlay in sticky mode cancels only on clean click-release (not when dragging)
         if (msg == WM_LBUTTONDOWN && ringOpen &&
             m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen())
         {
-            if (m_callbacks.isPointInOverlay && !m_callbacks.isPointInOverlay(ms->pt))
+            const bool dragActive = m_callbacks.isRingDragActive && m_callbacks.isRingDragActive();
+            if (!dragActive && (!m_callbacks.isPointInOverlay || !m_callbacks.isPointInOverlay(ms->pt)))
+            {
+                m_outsideClickPending = true;
+                m_outsideClickOrigin = ms->pt;
+            }
+            else
+            {
+                m_outsideClickPending = false;
+            }
+        }
+        else if (msg == WM_LBUTTONUP && m_outsideClickPending)
+        {
+            m_outsideClickPending = false;
+            const bool dragActive = m_callbacks.isRingDragActive && m_callbacks.isRingDragActive();
+            if (ringOpen && m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen() &&
+                !dragActive && (!m_callbacks.isPointInOverlay || !m_callbacks.isPointInOverlay(ms->pt)))
             {
                 if (m_callbacks.onCancelRequested)
                     m_callbacks.onCancelRequested();
@@ -395,10 +423,12 @@ namespace winrings
         const double movedDip = std::hypot(
             static_cast<double>(releasePt.x - m_triggerOrigin.x),
             static_cast<double>(releasePt.y - m_triggerOrigin.y)) / (dpiScale > 0.0 ? dpiScale : 1.0);
-        const bool isTap = (elapsedMs < static_cast<double>(m_config.tapThresholdMs)) &&
-            (movedDip < m_config.deadzoneDip);
+        const bool lbuttonHeld = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        const bool isTap = lbuttonHeld ||
+            ((elapsedMs < static_cast<double>(m_config.tapThresholdMs)) &&
+             (movedDip < m_config.deadzoneDip));
 
-        if (isTap && m_config.doubleTapLastApp)
+        if (!lbuttonHeld && isTap && m_config.doubleTapLastApp)
         {
             const double sinceLastMs = (m_lastTapQpc > 0)
                 ? (static_cast<double>(now.QuadPart - m_lastTapQpc) * 1000.0 / static_cast<double>(m_qpcFreq))

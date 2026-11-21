@@ -4,8 +4,6 @@
 #include <string>
 #include <vector>
 
-#include "ClockFormat.h"
-
 namespace winrings
 {
     enum class MouseTriggerButton
@@ -35,13 +33,6 @@ namespace winrings
         A4S,       // "A4S Menu" (Default — live environment-reactive frosted acrylic)
         DarkWood,  // "Dark Wood" (previous matte #202020 look, renamed)
         Blue       // "Blue" (re-added classic #3186FF glass look)
-    };
-
-    enum class TopBarBackdrop
-    {
-        Clear,
-        Frosted,
-        Native
     };
 
     enum class SlotKind
@@ -82,7 +73,6 @@ namespace winrings
         bool menuKeyEnabled = false;
         bool interceptWinTab = false;
         bool interceptAltTab = false;
-        bool topBarRingButton = false;
 
         // Ring Geometry, Look & Behavior
         double deadzoneDip = 18.0;
@@ -100,23 +90,6 @@ namespace winrings
         bool shiftCenterOnActiveMonitor = true;
         bool includeUnpinnedRunningApps = true;
         int maxSlots = 14;
-        std::wstring ffmpegPath = L"ffmpeg";
-
-        // Unified Minimal Top Bar (Supersedes ClearTaskbar)
-        bool topBarEnabled = true;
-        bool topBarDockTop = true;
-        int topBarHeightDip = 30;
-        bool topBarPreserveFontSize = true;
-        bool topBarClockSingleLine = true;
-        std::wstring topBarClockFormat = L"ddd d MMM  h:mm tt";
-        ClockCasing topBarClockCasing = ClockCasing::CompactLower;
-        bool topBarHideAppButtons = true;
-        bool topBarHideStart = true;
-        bool topBarHideSearch = true;
-        bool topBarHideTaskView = true;
-        bool topBarHideWidgets = true;
-        TopBarBackdrop topBarBackdrop = TopBarBackdrop::Clear;
-        bool topBarAllMonitors = true;
 
         std::vector<PinnedSlotConfig> pinnedSlots;
 
@@ -138,7 +111,5 @@ namespace winrings
     const wchar_t* ToString(ScrollWheelBehavior v) noexcept;
     const wchar_t* ToString(WindowViewMode v) noexcept;
     const wchar_t* ToString(RingTheme v) noexcept;
-    const wchar_t* ToString(TopBarBackdrop v) noexcept;
-    const wchar_t* ToString(ClockCasing v) noexcept;
     const wchar_t* ToString(SlotKind v) noexcept;
 } // namespace winrings

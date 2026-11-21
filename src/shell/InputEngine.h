@@ -14,6 +14,7 @@ namespace winrings
         {
             std::function<bool()> isRingOpen;
             std::function<bool()> isRingLockedOpen;
+            std::function<bool()> isRingDragActive;
             std::function<bool(POINT screenPt)> isPointInOverlay;
             std::function<double()> getOverlayDpiScale;
             std::function<void(int screenX, int screenY)> onTriggerPressed;
@@ -67,10 +68,12 @@ namespace winrings
         bool m_mouseTrigger = false;
         bool m_rightButtonDown = false;
         bool m_chordActive = false;
+        bool m_outsideClickPending = false;
         LONGLONG m_triggerDownQpc = 0;
         LONGLONG m_lastTapQpc = 0;
         LONGLONG m_qpcFreq = 1;
         POINT m_triggerOrigin{};
+        POINT m_outsideClickOrigin{};
 
         static InputEngine* s_instance;
     };

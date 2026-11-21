@@ -81,30 +81,6 @@ namespace winrings
         return L"A4S";
     }
 
-    const wchar_t* ToString(TopBarBackdrop v) noexcept
-    {
-        switch (v)
-        {
-        case TopBarBackdrop::Clear: return L"Clear";
-        case TopBarBackdrop::Frosted: return L"Frosted";
-        case TopBarBackdrop::Native: return L"Native";
-        }
-        return L"Clear";
-    }
-
-    const wchar_t* ToString(ClockCasing v) noexcept
-    {
-        switch (v)
-        {
-        case ClockCasing::CompactLower: return L"CompactLower";
-        case ClockCasing::Exact: return L"Exact";
-        case ClockCasing::Lower: return L"Lower";
-        case ClockCasing::Upper: return L"Upper";
-        case ClockCasing::Title: return L"Title";
-        }
-        return L"CompactLower";
-    }
-
     const wchar_t* ToString(SlotKind v) noexcept
     {
         switch (v)
@@ -648,7 +624,6 @@ namespace winrings
         TryGetBool(*obj, "menuKeyEnabled", cfg.menuKeyEnabled);
         TryGetBool(*obj, "interceptWinTab", cfg.interceptWinTab);
         TryGetBool(*obj, "interceptAltTab", cfg.interceptAltTab);
-        TryGetBool(*obj, "topBarRingButton", cfg.topBarRingButton);
 
         TryGetDouble(*obj, "deadzoneDip", cfg.deadzoneDip);
         TryGetDouble(*obj, "ringRadiusDip", cfg.ringRadiusDip);
@@ -685,38 +660,6 @@ namespace winrings
         TryGetBool(*obj, "shiftCenterOnActiveMonitor", cfg.shiftCenterOnActiveMonitor);
         TryGetBool(*obj, "includeUnpinnedRunningApps", cfg.includeUnpinnedRunningApps);
         TryGetInt(*obj, "maxSlots", cfg.maxSlots);
-        TryGetWString(*obj, "ffmpegPath", cfg.ffmpegPath);
-
-        TryGetBool(*obj, "topBarEnabled", cfg.topBarEnabled);
-        TryGetBool(*obj, "topBarDockTop", cfg.topBarDockTop);
-        TryGetInt(*obj, "topBarHeightDip", cfg.topBarHeightDip);
-        TryGetBool(*obj, "topBarPreserveFontSize", cfg.topBarPreserveFontSize);
-        TryGetBool(*obj, "topBarClockSingleLine", cfg.topBarClockSingleLine);
-        TryGetWString(*obj, "topBarClockFormat", cfg.topBarClockFormat);
-        if (TryGetWString(*obj, "topBarClockCasing", s))
-        {
-            cfg.topBarClockCasing = ParseEnum<ClockCasing>(s, cfg.topBarClockCasing, {
-                { L"CompactLower", ClockCasing::CompactLower },
-                { L"Exact", ClockCasing::Exact },
-                { L"Lower", ClockCasing::Lower },
-                { L"Upper", ClockCasing::Upper },
-                { L"Title", ClockCasing::Title }
-            });
-        }
-        TryGetBool(*obj, "topBarHideAppButtons", cfg.topBarHideAppButtons);
-        TryGetBool(*obj, "topBarHideStart", cfg.topBarHideStart);
-        TryGetBool(*obj, "topBarHideSearch", cfg.topBarHideSearch);
-        TryGetBool(*obj, "topBarHideTaskView", cfg.topBarHideTaskView);
-        TryGetBool(*obj, "topBarHideWidgets", cfg.topBarHideWidgets);
-        if (TryGetWString(*obj, "topBarBackdrop", s))
-        {
-            cfg.topBarBackdrop = ParseEnum<TopBarBackdrop>(s, cfg.topBarBackdrop, {
-                { L"Clear", TopBarBackdrop::Clear },
-                { L"Frosted", TopBarBackdrop::Frosted },
-                { L"Native", TopBarBackdrop::Native }
-            });
-        }
-        TryGetBool(*obj, "topBarAllMonitors", cfg.topBarAllMonitors);
 
         const auto pinsIt = obj->find("pinnedSlots");
         if (pinsIt != obj->end() && pinsIt->second.IsArray())
@@ -736,7 +679,6 @@ namespace winrings
         cfg.glassLevel = std::clamp(cfg.glassLevel, 0, 100);
         cfg.lightDarkMode = std::clamp(cfg.lightDarkMode, 0, 100);
         cfg.maxSlots = std::clamp(cfg.maxSlots, 4, 24);
-        cfg.topBarHeightDip = std::clamp(cfg.topBarHeightDip, 24, 52);
 
         outConfig = std::move(cfg);
         return true;
@@ -783,7 +725,6 @@ namespace winrings
         addBool("menuKeyEnabled", menuKeyEnabled);
         addBool("interceptWinTab", interceptWinTab);
         addBool("interceptAltTab", interceptAltTab);
-        addBool("topBarRingButton", topBarRingButton);
 
         addDouble("deadzoneDip", deadzoneDip);
         addDouble("ringRadiusDip", ringRadiusDip);
@@ -800,22 +741,6 @@ namespace winrings
         addBool("shiftCenterOnActiveMonitor", shiftCenterOnActiveMonitor);
         addBool("includeUnpinnedRunningApps", includeUnpinnedRunningApps);
         addInt("maxSlots", maxSlots);
-        addWStr("ffmpegPath", ffmpegPath);
-
-        addBool("topBarEnabled", topBarEnabled);
-        addBool("topBarDockTop", topBarDockTop);
-        addInt("topBarHeightDip", topBarHeightDip);
-        addBool("topBarPreserveFontSize", topBarPreserveFontSize);
-        addBool("topBarClockSingleLine", topBarClockSingleLine);
-        addWStr("topBarClockFormat", topBarClockFormat);
-        addWStr("topBarClockCasing", ToString(topBarClockCasing));
-        addBool("topBarHideAppButtons", topBarHideAppButtons);
-        addBool("topBarHideStart", topBarHideStart);
-        addBool("topBarHideSearch", topBarHideSearch);
-        addBool("topBarHideTaskView", topBarHideTaskView);
-        addBool("topBarHideWidgets", topBarHideWidgets);
-        addWStr("topBarBackdrop", ToString(topBarBackdrop));
-        addBool("topBarAllMonitors", topBarAllMonitors);
 
         out += "  \"pinnedSlots\": [";
         if (!pinnedSlots.empty())

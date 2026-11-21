@@ -38,16 +38,17 @@ Configured via `mouseTrigger` in `%APPDATA%\WinRings\config.json` or the **Trigg
 
 ---
 
-## 2. Outer-Arc Submenus & Drag-and-Drop Tools
+## 2. Outer-Arc Submenus & Drag-and-Drop Workflows
 
-- **Multi-Window Apps:** Hovering any app slot with 2+ open windows (or 1+ when `fanOutSingleWindow: true`) fans out live rounded DWM window thumbnails along the outer arc (`windowSubmenuView: "OuterArc"`) or displays a vertical title list (`"TitleColumn"`).
-- **Downloads Slot Fan-Out:** Hovering the pinned `Downloads` folder slot fans out the 9 most recently modified files/folders in your `Downloads` directory. You can click any item to open it or **drag it directly out of the Ring** into another application (OLE `IDropSource`).
-- **Dropping Files onto the Ring:** Start dragging files in File Explorer and trigger the Ring:
-  - Drop onto an **App** slot to open the files with that application.
-  - Drop onto a **Folder** slot to move/copy the files into that directory (`Shift` forces Move, `Ctrl` forces Copy).
+- **Multi-Window Apps:** Hovering any app slot with 2+ open windows (or 1+ when `fanOutSingleWindow: true`) fans out live rounded DWM window thumbnails along the outer arc (`windowViewMode: "OuterArc"`) or displays a vertical title list (`"TitleColumn"`).
+- **Downloads Slot Fan-Out:** Hovering the pinned `Downloads` folder slot fans out the 9 most recently modified files/folders in your `Downloads` directory. Click any item to open it or **drag it directly out of the Ring** (OLE `IDropSource`); the ring remains open during your drag so you can also drop or spring-load onto other ring slots.
+- **Drag Icons to Reorder:** In Sticky Mode, press and drag any pinned icon around the ring annulus to reorder slots interactively; releasing saves the new order to `config.json`.
+- **Dropping Files / URLs onto the Ring:** Start dragging files or links anywhere (even outside the ring, or press the ring trigger while dragging) and move onto the Ring:
+  - Drop onto the **Center Hub** (`Pin to Ring`) to pin a file, folder, `.exe`, or `http(s)://` URL directly to the ring.
+  - Drop onto an **App** or **Script** slot to launch it with the dropped files as arguments.
+  - Drop onto a **Folder** slot (e.g., `Downloads`) to copy the dropped files into that directory.
   - Drop onto **Recycle Bin** to send the files to the Windows Recycle Bin.
-  - Drop onto **Convert** to convert images (`.png`, `.jpg`, `.webp`, `.bmp`, `.ico`) via WIC or video/audio via `ffmpeg`.
-  - Drop onto **Actions** to open the Compress/Trim dialog, create a `.zip` archive, or open the interactive Direct2D/WIC **Redact Editor** (Solid, Blur, Pixelate).
+  - **Spring-Loaded Window Switch:** Hold dragged files steady over any **App** or **Folder** icon for ~0.5 seconds; after a double-heartbeat scale pulse, WinRings brings that app or folder window forward while you continue holding the drag so you can drop directly inside the window.
 
 ---
 

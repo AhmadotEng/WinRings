@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "../shared/SlotMatching.h"
 #include "../shared/WinRingsConfig.h"
 #include "WindowTracker.h"
 
@@ -29,10 +30,13 @@ namespace winrings
         std::vector<std::wstring> searchAliases;
 
         bool IsRunning() const noexcept { return !windows.empty(); }
+        bool ShowsWindowPreview(bool fanOutSingleWindow) const noexcept
+        {
+            return ShouldShowSlotWindowPreview(kind, windows.size(), fanOutSingleWindow);
+        }
         bool HasSubmenu(bool fanOutSingleWindow) const noexcept
         {
-            const size_t minWin = fanOutSingleWindow ? 1 : 2;
-            return windows.size() >= minWin || kind == SlotKind::Folder || kind == SlotKind::Collection;
+            return ShowsWindowPreview(fanOutSingleWindow) || kind == SlotKind::Folder || kind == SlotKind::Collection;
         }
     };
 
@@ -46,9 +50,13 @@ namespace winrings
             IWICImagingFactory* wicFactory,
             const AppIndex* appIndex = nullptr);
 
+        static bool ExplorerWindowMatchesFolder(const std::wstring& windowTitle, const std::wstring& expandedFolderPath);
+        static bool ExplorerWindowMatchesRecycleBin(const std::wstring& windowTitle, const std::wstring& localizedRecycleBinName = L"Recycle Bin");
+
         static void LaunchPathOrUrl(const std::wstring& pathOrUrl, const std::wstring& arguments = L"");
         static void RevealInExplorer(const std::wstring& path);
         static bool SendToRecycleBin(const std::vector<std::wstring>& paths);
+        static bool CopyFilesToFolder(const std::vector<std::wstring>& paths, const std::wstring& destFolder);
         static bool EmptyRecycleBin(HWND ownerHwnd);
         static std::wstring ExpandEnv(const std::wstring& input);
 

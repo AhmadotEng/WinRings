@@ -204,6 +204,44 @@ namespace winrings
             }
         }
 
+        template <typename Pred>
+        void CollectMatchingExplorerWindows(
+            const std::vector<AppWindowGroup>& running,
+            std::vector<WindowEntry>& outWindows,
+            Pred&& matchTitle)
+        {
+            for (const auto& grp : running)
+            {
+                const bool isExplorerGroup = IsExplorerExecutablePath(grp.exePath) ||
+                    _wcsicmp(grp.processName.c_str(), L"explorer") == 0;
+                if (!isExplorerGroup)
+                    continue;
+                for (const auto& w : grp.windows)
+                {
+                    if (matchTitle(w.title))
+                        outWindows.push_back(w);
+                }
+            }
+        }
+
+        std::wstring GetLocalizedRecycleBinName()
+        {
+            std::wstring name = L"Recycle Bin";
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderIDList(FOLDERID_RecycleBinFolder, 0, nullptr, &pidl)) && pidl)
+            {
+                PWSTR display = nullptr;
+                if (SUCCEEDED(SHGetNameFromIDList(pidl, SIGDN_NORMALDISPLAY, &display)) && display)
+                {
+                    if (display[0] != L'\0')
+                        name = display;
+                    CoTaskMemFree(display);
+                }
+                CoTaskMemFree(pidl);
+            }
+            return name;
+        }
+
         RingSlot CreateSlotFromConfig(
             const PinnedSlotConfig& cfg,
             const std::vector<AppWindowGroup>& running,
@@ -243,7 +281,18 @@ namespace winrings
                     slot.iconBitmap = tracker.GetShellIconBitmap(expanded);
 
                 const std::wstring stem = FileStemOfPath(resolvedExePath);
-                std::wstring friendly = appIndex ? appIndex->FindFriendlyNameForExe(resolvedExePath) : L"";
+                const bool isExplorer = IsExplorerExecutablePath(resolvedExePath) ||
+                    _wcsicmp(stem.c_str(), L"explorer") == 0;
+                if (isExplorer)
+                {
+                    auto explorerIcon = tracker.GetShellIconBitmap(!expanded.empty() ? expanded : resolvedExePath);
+                    if (explorerIcon)
+                        slot.iconBitmap = std::move(explorerIcon);
+                }
+
+                std::wstring friendly = isExplorer
+                    ? std::wstring(L"File Explorer")
+                    : (appIndex ? appIndex->FindFriendlyNameForExe(resolvedExePath) : L"");
                 if (friendly.empty())
                     friendly = AppIndex::ResolveExecutableFriendlyName(resolvedExePath);
                 if (!friendly.empty() &&
@@ -256,7 +305,12 @@ namespace winrings
             {
                 slot.iconBitmap = tracker.GetShellIconBitmap(expanded);
                 if (cfg.kind == SlotKind::Folder)
+                {
                     PopulateFolderSubItems(slot, expanded, slot.maxFolderItems, tracker);
+                    CollectMatchingExplorerWindows(running, slot.windows, [&](const std::wstring& title) {
+                        return SlotModel::ExplorerWindowMatchesFolder(title, expanded);
+                    });
+                }
             }
             else if (cfg.kind == SlotKind::Website)
             {
@@ -271,6 +325,10 @@ namespace winrings
             else if (cfg.kind == SlotKind::RecycleBin)
             {
                 slot.iconBitmap = tracker.GetStockIconBitmap(IsRecycleBinFull() ? SIID_RECYCLERFULL : SIID_RECYCLER);
+                const std::wstring recycleBinName = GetLocalizedRecycleBinName();
+                CollectMatchingExplorerWindows(running, slot.windows, [&](const std::wstring& title) {
+                    return SlotModel::ExplorerWindowMatchesRecycleBin(title, recycleBinName);
+                });
             }
             else if (cfg.kind == SlotKind::Collection)
             {
@@ -294,6 +352,16 @@ namespace winrings
             return slot;
         }
     } // namespace
+
+    bool SlotModel::ExplorerWindowMatchesFolder(const std::wstring& windowTitle, const std::wstring& expandedFolderPath)
+    {
+        return ::winrings::ExplorerWindowMatchesFolder(windowTitle, expandedFolderPath);
+    }
+
+    bool SlotModel::ExplorerWindowMatchesRecycleBin(const std::wstring& windowTitle, const std::wstring& localizedRecycleBinName)
+    {
+        return ::winrings::ExplorerWindowMatchesRecycleBin(windowTitle, localizedRecycleBinName);
+    }
 
     std::wstring SlotModel::ExpandEnv(const std::wstring& input)
     {
@@ -341,12 +409,19 @@ namespace winrings
                 RingSlot s;
                 s.id = L"run-" + grp.normalizedKey;
                 s.kind = SlotKind::App;
-                std::wstring friendly = appIndex ? appIndex->FindFriendlyNameForExe(grp.exePath) : L"";
+                const bool isExplorer = IsExplorerExecutablePath(grp.exePath) ||
+                    _wcsicmp(grp.processName.c_str(), L"explorer") == 0;
+                std::wstring friendly = isExplorer
+                    ? std::wstring(L"File Explorer")
+                    : (appIndex ? appIndex->FindFriendlyNameForExe(grp.exePath) : L"");
                 if (friendly.empty() && !grp.exePath.empty())
                     friendly = AppIndex::ResolveExecutableFriendlyName(grp.exePath);
                 s.label = !friendly.empty() ? friendly : grp.processName;
                 s.pathOrUrl = grp.exePath;
-                s.iconBitmap = grp.iconBitmap;
+                if (isExplorer && !grp.exePath.empty())
+                    s.iconBitmap = tracker.GetShellIconBitmap(grp.exePath);
+                if (!s.iconBitmap)
+                    s.iconBitmap = grp.iconBitmap;
                 s.isPinned = false;
                 s.windows = grp.windows;
                 for (const auto& w : s.windows)
@@ -409,27 +484,55 @@ namespace winrings
         ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
     }
 
+    namespace
+    {
+        std::wstring BuildDoubleNullList(const std::vector<std::wstring>& paths)
+        {
+            std::wstring doubleNull;
+            for (const auto& p : paths)
+            {
+                if (!p.empty())
+                {
+                    doubleNull += p;
+                    doubleNull.push_back(L'\0');
+                }
+            }
+            if (!doubleNull.empty())
+                doubleNull.push_back(L'\0');
+            return doubleNull;
+        }
+    }
+
     bool SlotModel::SendToRecycleBin(const std::vector<std::wstring>& paths)
     {
-        if (paths.empty())
-            return false;
-        std::wstring doubleNull;
-        for (const auto& p : paths)
-        {
-            if (!p.empty())
-            {
-                doubleNull += p;
-                doubleNull.push_back(L'\0');
-            }
-        }
+        const std::wstring doubleNull = BuildDoubleNullList(paths);
         if (doubleNull.empty())
             return false;
-        doubleNull.push_back(L'\0');
 
         SHFILEOPSTRUCTW op{};
         op.wFunc = FO_DELETE;
         op.pFrom = doubleNull.c_str();
         op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+        return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+    }
+
+    bool SlotModel::CopyFilesToFolder(const std::vector<std::wstring>& paths, const std::wstring& destFolder)
+    {
+        if (destFolder.empty())
+            return false;
+        const std::wstring srcList = BuildDoubleNullList(paths);
+        if (srcList.empty())
+            return false;
+
+        std::wstring dstList = destFolder;
+        dstList.push_back(L'\0');
+        dstList.push_back(L'\0');
+
+        SHFILEOPSTRUCTW op{};
+        op.wFunc = FO_COPY;
+        op.pFrom = srcList.c_str();
+        op.pTo = dstList.c_str();
+        op.fFlags = FOF_ALLOWUNDO | FOF_RENAMEONCOLLISION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI;
         return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
     }
 

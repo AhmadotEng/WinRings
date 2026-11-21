@@ -6,7 +6,6 @@
 #include "../shared/WinRingsApi.h"
 #include "../shared/WinRingsIdentity.h"
 #include "ShellController.h"
-#include "XamlTaskbarCtrl.h"
 
 namespace
 {
@@ -42,16 +41,6 @@ extern "C" const WinRingsApi* WINAPI WinRings_GetApi(UINT32 requestedAbi)
 extern "C" int WINAPI WinRings_RunPreview(void)
 {
     return winrings::ShellController::RunStandalonePreview(g_shellModule);
-}
-
-STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** result)
-{
-    return winrings::XamlTaskbarCtrl::GetClassObject(clsid, iid, result);
-}
-
-STDAPI DllCanUnloadNow(void)
-{
-    return S_FALSE;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
