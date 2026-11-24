@@ -8,7 +8,7 @@
 
 **WinRings** is a **100% pure native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR)** Windows 11 Radial Switcher & Gesture Engine that integrates cleanly into `explorer.exe`. It delivers an instant-opening Direct2D + DirectComposition radial app/window/file switcher with native A4S-Menu WCA acrylic glass, smooth 3D glass bevel rims, live rounded DWM window thumbnails, outer-arc submenus, `Downloads` folder fan-out with OLE drag-out, spring-loaded hover-to-open windows, drag-to-reorder ring icons, and direct file/URL drag-and-drop.
 
-WinRings is completely independent of Windows taskbar customization — it does not hook `Taskbar.dll`, `SystemTray.dll`, or taskbar XAML diagnostics, so it runs cleanly alongside **A4S-Menu** and the standalone **ClearTaskbar** host.
+WinRings is a pure Radial Switcher & Gesture Launcher — it never hooks Windows taskbar modules, system tray UI, or Start Menu internals, so it coexists cleanly alongside companion desktop utilities.
 
 ---
 
@@ -22,7 +22,6 @@ WinRings is completely independent of Windows taskbar customization — it does 
 - [Configuration (`config.json`)](#configuration-configjson)
 - [Building & Testing from Source](#building--testing-from-source)
 - [Documentation Index](#documentation-index)
-- [Project Lineage](#project-lineage)
 - [License](#license)
 
 ---
@@ -231,22 +230,13 @@ Verifies x64 PE headers, zero CLR imports, DLL exports, ABI contract (`WinRingsA
 
 ## Documentation Index
 
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Deep-dive into the 4-binary architecture, Explorer injection protocol, Direct2D/DirectComposition rendering, DWM thumbnail pool, and clean separation from taskbar tools.
-- **[docs/CONFIGURATION_AND_USAGE.md](docs/CONFIGURATION_AND_USAGE.md)** — Complete user & power-user guide covering triggers, themes, pins, collections, interactive drag-and-drop workflows, and Startup setup.
-- **[docs/BUILDING_AND_TESTING.md](docs/BUILDING_AND_TESTING.md)** — Build pipeline, verification gates, live lifecycle testing, and troubleshooting with `shell_diag.log`.
-- **[docs/PRIOR_PROJECTS_SYNTHESIS.md](docs/PRIOR_PROJECTS_SYNTHESIS.md)** — Technical study of predecessor projects (`A4S-Menu` and `ClearTaskbar.exe`) and how WinRings unifies their shell integration patterns.
-- **[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** — Complete engineering specification and phase-by-phase implementation plan.
-- **[docs/ENGINEERING_WALKTHROUGH.md](docs/ENGINEERING_WALKTHROUGH.md)** — Development, debugging, reverse-engineering (`Taskbar.dll` & `SystemTray.dll`), and verification walkthrough.
-- **[docs/RADIAL_SWITCHER_SPEC.md](docs/RADIAL_SWITCHER_SPEC.md)** — Original radial switcher design plan and interaction specification.
-- **[CHANGELOG.md](CHANGELOG.md)** — Release history and `v1.0.0` release notes.
-
----
-
-## Project Lineage
-
-WinRings builds upon lessons learned from two earlier Windows 11 shell customization projects:
-- **[A4S-Menu](https://github.com/AhmadotEng/A4S-Menu)** — Native C++17 `A4SHost.exe` + `A4SShell.dll` Explorer-injected Start Menu replacement with crash-loop safety guards, cryptographic injection handshakes, and single-file SHA-256-verified installer packaging.
-- **ClearTaskbar** — In-process Windows 11 XAML Visual Diagnostics (`InitializeXamlDiagnosticsEx` + `IVisualTreeServiceCallback2`) taskbar controller for transparent backdrops and single-line clock formatting.
+- **[AGENTS.md](AGENTS.md)** — Primary engineering guide, development invariants, verification loop, and context pointers for new contributors & AI agents.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Four-binary architecture, Explorer injection & IPC/ABI contract, module inventory, and data flows.
+- **[docs/VISUAL_SYSTEM.md](docs/VISUAL_SYSTEM.md)** — Dual-HWND native WCA acrylic pipeline, `1.0 px`-inset region clipping, 3D glass bezels, `RingThemeEngine.h` presets/sliders, and `dwmcore`/Direct2D 1.1 calibration.
+- **[docs/INTERACTION_AND_MATH.md](docs/INTERACTION_AND_MATH.md)** — `InputEngine` triggers, click-vs-drag, `RadialMath.h` corridors/arcs, drag-and-drop workflows, spring-loading, reorder math, and 4-tier search.
+- **[docs/BUILDING_AND_TESTING.md](docs/BUILDING_AND_TESTING.md)** — MSVC x64 build pipeline, 5 verification gates, safe `--preview`/`--settings` testing, and `shell_diag.log` diagnostics.
+- **[docs/ROADMAP_AND_IDEAS.md](docs/ROADMAP_AND_IDEAS.md)** — Feature ideas, UX polish opportunities, modularity refactors, and scope guardrails for WinRings v3.1+.
+- **[CHANGELOG.md](CHANGELOG.md)** — Full release history (`v1.0.0` through `v3.0.0`).
 
 ---
 
