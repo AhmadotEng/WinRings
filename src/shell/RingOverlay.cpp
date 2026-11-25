@@ -2,7 +2,7 @@
 
 #include <ShellScalingApi.h>
 #include <dwmapi.h>
-#include <uxtheme.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
@@ -10,8 +10,10 @@
 #include <unordered_set>
 
 #include "../shared/SearchMatch.h"
+#include "../shared/WinRingsDeltaIpc.h"
 #include "../shared/WinRingsIdentity.h"
 #include "AppIndex.h"
+#include "ContextFlyout.h"
 
 namespace winrings
 {
@@ -505,9 +507,195 @@ namespace winrings
 
     void RingOverlay::SetConfig(const SwitcherConfig& config)
     {
+        const bool geomChanged =
+            std::abs(m_config.ringRadiusDip - config.ringRadiusDip) > 0.1 ||
+            std::abs(m_config.iconSizeDip - config.iconSizeDip) > 0.1 ||
+            std::abs(m_config.deadzoneDip - config.deadzoneDip) > 0.1 ||
+            std::abs(m_config.thumbnailScale - config.thumbnailScale) > 0.01;
         m_config = config;
         if (m_isOpen)
+        {
+            if (geomChanged)
+            {
+                UpdateDpiAndPosition(
+                    static_cast<int>(std::llround(m_centerScreenPhysical.x)),
+                    static_cast<int>(std::llround(m_centerScreenPhysical.y)));
+                m_lastWcaRegionHash = 0;
+            }
             Render();
+        }
+    }
+
+    void RingOverlay::RefreshSlots(std::vector<RingSlot> slots)
+    {
+        const double prevOuterR = ActiveGeometry().outerRadius;
+        m_pressKind = PressKind::None;
+        m_pressSlotIndex = -1;
+        m_pressSubIndex = -1;
+        m_reorderActive = false;
+        m_reorderWasUnpinned = false;
+        m_reorderFromIndex = -1;
+        m_reorderCurrentIndex = -1;
+        m_dragActive = false;
+        m_dragOverCenter = false;
+        ResetDragSpringState();
+        ClearSubmenu();
+        m_filterQuery.clear();
+        m_selectedIndex = -1;
+
+        m_allSlots = std::move(slots);
+        if (!m_isOpen)
+            return;
+
+        m_d2dBitmapCache.clear();
+        m_lastWcaRegionHash = 0;
+        m_visibleSlots = m_allSlots;
+        m_slotSearchMatched.assign(m_visibleSlots.size(), true);
+        m_slotScales.assign(m_visibleSlots.size(), kIdleSlotScale);
+        if (std::abs(ActiveGeometry().outerRadius - prevOuterR) > 0.5)
+        {
+            UpdateDpiAndPosition(
+                static_cast<int>(std::llround(m_centerScreenPhysical.x)),
+                static_cast<int>(std::llround(m_centerScreenPhysical.y)));
+            m_lastWcaRegionHash = 0;
+        }
+        RebuildLayoutAfterFilter();
+    }
+
+    bool RingOverlay::EnsureDCompPipeline()
+    {
+        if (m_acrylicBackdrop.IsActive())
+        {
+            m_acrylicBackdrop.Shutdown();
+            if (m_hwnd)
+            {
+                const BOOL off = FALSE;
+                DwmSetWindowAttribute(m_hwnd, 17 /* DWMWA_USE_HOSTBACKDROPBRUSH */, &off, sizeof(off));
+                const MARGINS noGlass{ 0, 0, 0, 0 };
+                DwmExtendFrameIntoClientArea(m_hwnd, &noGlass);
+            }
+        }
+        if (m_dcompDevice && m_dcompTarget && m_dcompVisual)
+            return true;
+        if (!m_dxgiDevice || !m_hwnd || !m_swapChain)
+            return false;
+        if (FAILED(DCompositionCreateDevice(m_dxgiDevice.Get(), IID_PPV_ARGS(m_dcompDevice.ReleaseAndGetAddressOf()))))
+            return false;
+        if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, m_dcompTarget.ReleaseAndGetAddressOf())))
+        {
+            ReleaseDCompPipeline();
+            return false;
+        }
+        if (FAILED(m_dcompDevice->CreateVisual(m_dcompVisual.ReleaseAndGetAddressOf())))
+        {
+            ReleaseDCompPipeline();
+            return false;
+        }
+        if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())) ||
+            FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
+        {
+            ReleaseDCompPipeline();
+            return false;
+        }
+        m_dcompDevice->Commit();
+        return true;
+    }
+
+    void RingOverlay::ReleaseDCompPipeline()
+    {
+        if (m_dcompTarget)
+            m_dcompTarget->SetRoot(nullptr);
+        if (m_dcompDevice)
+            m_dcompDevice->Commit();
+        m_dcompVisual.Reset();
+        m_dcompTarget.Reset();
+        m_dcompDevice.Reset();
+    }
+
+    bool RingOverlay::SyncBackdropBackend(SurfaceTexture desired, const SwitcherConfig& effectiveCfg)
+    {
+        const ActiveBackdropBackend targetBackend =
+            (desired == SurfaceTexture::TaskbarGlass) ? ActiveBackdropBackend::TaskbarComposition
+            : (desired == SurfaceTexture::PureMatte) ? ActiveBackdropBackend::MatteDComp
+            : ActiveBackdropBackend::WcaDualHwnd;
+
+        if (m_activeBackend == targetBackend &&
+            ((targetBackend == ActiveBackdropBackend::WcaDualHwnd && m_wcaBackdropActive && m_dcompDevice) ||
+             (targetBackend == ActiveBackdropBackend::TaskbarComposition && m_acrylicBackdrop.IsActive()) ||
+             (targetBackend == ActiveBackdropBackend::MatteDComp && m_dcompDevice)))
+        {
+            return true;
+        }
+
+        if (desired == SurfaceTexture::TaskbarGlass)
+        {
+            if (m_wcaBackdropHwnd && IsWindow(m_wcaBackdropHwnd))
+                ShowWindow(m_wcaBackdropHwnd, SW_HIDE);
+            m_wcaBackdropActive = false;
+            ReleaseDCompPipeline();
+
+            if (m_acrylicBackdrop.Initialize(m_hwnd, m_swapChain.Get(), m_maskSwapChain.Get(),
+                m_swapWidthPx, m_swapHeightPx))
+            {
+                AcrylicMaterialParams p = AcrylicParamsFromMaterial(ComputeRingMaterial(effectiveCfg, m_dpiScale));
+                p.blurSigma *= static_cast<float>((std::max)(1.0, m_dpiScale));
+                m_acrylicBackdrop.UpdateMaterial(p);
+                m_activeBackend = ActiveBackdropBackend::TaskbarComposition;
+                return true;
+            }
+            // Fallback to DComp matte if HostBackdrop is unavailable in this session
+            if (EnsureDCompPipeline())
+            {
+                m_activeBackend = ActiveBackdropBackend::MatteDComp;
+                return true;
+            }
+            return false;
+        }
+
+        if (desired == SurfaceTexture::PureMatte)
+        {
+            if (m_wcaBackdropHwnd && IsWindow(m_wcaBackdropHwnd))
+                ShowWindow(m_wcaBackdropHwnd, SW_HIDE);
+            m_wcaBackdropActive = false;
+            if (EnsureDCompPipeline())
+            {
+                m_activeBackend = ActiveBackdropBackend::MatteDComp;
+                return true;
+            }
+            return false;
+        }
+
+        // SurfaceTexture::A4SAcrylic
+        if (!EnsureDCompPipeline())
+            return false;
+        if (!m_wcaBackdropHwnd)
+            m_wcaBackdropActive = CreateWcaBackdropWindow();
+        else
+            m_wcaBackdropActive = true;
+
+        m_lastWcaState = -1;
+        m_lastWcaRegionHash = 0;
+        if (m_wcaBackdropActive && m_wcaBackdropHwnd)
+        {
+            if (m_isOpen)
+            {
+                RECT rc{};
+                if (GetWindowRect(m_hwnd, &rc))
+                {
+                    SetWindowPos(m_wcaBackdropHwnd, m_hwnd, rc.left, rc.top,
+                        rc.right - rc.left, rc.bottom - rc.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
+                else
+                {
+                    ShowWindow(m_wcaBackdropHwnd, SW_SHOWNOACTIVATE);
+                    SetWindowPos(m_wcaBackdropHwnd, m_hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+            }
+            m_activeBackend = ActiveBackdropBackend::WcaDualHwnd;
+            return true;
+        }
+        m_activeBackend = ActiveBackdropBackend::MatteDComp;
+        return true;
     }
 
     bool RingOverlay::CreateGraphicsDevices()
@@ -600,28 +788,9 @@ namespace winrings
 
         EnsureNoiseBrush();
 
-        if (m_wcaBackdropActive || !m_acrylicBackdrop.Initialize(m_hwnd, m_swapChain.Get(), m_maskSwapChain.Get(),
-            m_swapWidthPx, m_swapHeightPx))
-        {
-            // When native WCA ACCENT_ENABLE_ACRYLICBLURBEHIND is active on m_wcaBackdropHwnd (exact A4S-Menu path),
-            // m_hwnd renders crisp antialiased foreground chrome & icons over it via lightweight IDCompositionTarget.
-            if (FAILED(DCompositionCreateDevice(m_dxgiDevice.Get(), IID_PPV_ARGS(m_dcompDevice.ReleaseAndGetAddressOf()))))
-                return false;
-            if (FAILED(m_dcompDevice->CreateTargetForHwnd(m_hwnd, TRUE, m_dcompTarget.ReleaseAndGetAddressOf())))
-                return false;
-            if (FAILED(m_dcompDevice->CreateVisual(m_dcompVisual.ReleaseAndGetAddressOf())))
-                return false;
-            if (FAILED(m_dcompVisual->SetContent(m_swapChain.Get())))
-                return false;
-            if (FAILED(m_dcompTarget->SetRoot(m_dcompVisual.Get())))
-                return false;
-        }
-        else
-        {
-            m_acrylicBackdrop.UpdateMaterial(BuildAcrylicMaterial());
-        }
-
-        return true;
+        const SwitcherConfig effCfg = ResolveEffectiveConfigForSystem(m_config);
+        m_activeBackend = ActiveBackdropBackend::None;
+        return SyncBackdropBackend(effCfg.surfaceTexture, effCfg);
     }
 
     void RingOverlay::ReleaseGraphicsDevices()
@@ -639,6 +808,7 @@ namespace winrings
         m_dcompVisual.Reset();
         m_dcompTarget.Reset();
         m_dcompDevice.Reset();
+        m_activeBackend = ActiveBackdropBackend::None;
         m_glyphFormat.Reset();
         m_searchFormat.Reset();
         m_smallFormat.Reset();
@@ -788,6 +958,8 @@ namespace winrings
                 (mi.rcWork.right - mi.rcWork.left) / m_dpiScale,
                 (mi.rcWork.bottom - mi.rcWork.top) / m_dpiScale
             };
+            if (mi.rcWork.bottom >= mi.rcMonitor.bottom - 8)
+                workAreaDip.height = (std::max)(240.0, workAreaDip.height - 56.0);
         }
 
         const RingGeometry geom = ActiveGeometry();
@@ -856,14 +1028,15 @@ namespace winrings
 
     AcrylicMaterialParams RingOverlay::BuildAcrylicMaterial() const noexcept
     {
-        AcrylicMaterialParams p = AcrylicParamsFromMaterial(ComputeRingMaterial(m_config, m_dpiScale));
+        const SwitcherConfig effCfg = ResolveEffectiveConfigForSystem(m_config);
+        AcrylicMaterialParams p = AcrylicParamsFromMaterial(ComputeRingMaterial(effCfg, m_dpiScale));
         p.blurSigma *= static_cast<float>((std::max)(1.0, m_dpiScale));
         return p;
     }
 
     RingOverlay::ThemeColors RingOverlay::BuildThemeColors() const noexcept
     {
-        return ComputeRingMaterial(m_config, m_dpiScale);
+        return ComputeRingMaterial(ResolveEffectiveConfigForSystem(m_config), m_dpiScale);
     }
 
     void RingOverlay::OpenAt(int physicalX, int physicalY, std::vector<RingSlot> slots, bool lockOpen)
@@ -898,6 +1071,7 @@ namespace winrings
         m_pressSubIndex = -1;
         m_pressScreenPt = {};
         m_reorderActive = false;
+        m_reorderWasUnpinned = false;
         m_reorderFromIndex = -1;
         m_reorderCurrentIndex = -1;
         m_reorderCursorDip = {};
@@ -954,13 +1128,17 @@ namespace winrings
             return;
         m_isOpen = false;
         m_isLockedOpen = false;
+        m_openedForTrayPreview = false;
         m_contextMenuOpen = false;
+        m_pendingContextMenu = false;
+        DismissActiveContextFlyout();
         m_dragActive = false;
         m_dragOverCenter = false;
         m_pressKind = PressKind::None;
         m_pressSlotIndex = -1;
         m_pressSubIndex = -1;
         m_reorderActive = false;
+        m_reorderWasUnpinned = false;
         m_reorderFromIndex = -1;
         m_reorderCurrentIndex = -1;
         ResetDragSpringState();
@@ -1055,7 +1233,7 @@ namespace winrings
         }
         else if (!slot.subItems.empty())
         {
-            const int count = (std::min)(static_cast<int>(slot.subItems.size()), 9);
+            const int count = (std::min)(static_cast<int>(slot.subItems.size()), 12);
             const bool isFolderArc = (slot.kind == SlotKind::Folder);
             m_submenuIsTitleColumn = false;
             m_submenuHasArcTrack = true;
@@ -1130,8 +1308,8 @@ namespace winrings
 
     void RingOverlay::UpdatePointer(int physicalX, int physicalY)
     {
-        if (!m_isOpen || m_visibleSlots.empty() || m_contextMenuOpen || m_dragActive ||
-            m_reorderActive || m_pressKind != PressKind::None)
+        if (!m_isOpen || (m_visibleSlots.empty() && m_searchResultSlots.empty()) ||
+            m_contextMenuOpen || m_dragActive || m_reorderActive || m_pressKind != PressKind::None)
             return;
 
         m_hasLastPointer = true;
@@ -1194,12 +1372,19 @@ namespace winrings
                 nextRingIdx = next.selectedSlot;
             }
 
+            if (ShouldKeepSearchSelectionOnPointer(nextRingIdx, nextSubIdx))
+            {
+                if (next.updateCorridorOrigin)
+                    m_corridorOriginDip = localPt;
+                return;
+            }
+
             if (nextRingIdx != m_selectedIndex || nextSubIdx != m_selectedSubIndex)
             {
                 m_selectedIndex = nextRingIdx;
                 m_selectedSubIndex = nextSubIdx;
                 for (size_t i = 0; i < m_submenuCards.size(); ++i)
-                    m_submenuCards[i].targetScale = (static_cast<int>(i) == m_selectedSubIndex) ? 1.12 : 1.0;
+                    m_submenuCards[i].targetScale = (static_cast<int>(i) == m_selectedSubIndex) ? 1.18 : 1.0;
 
                 if (!allowHoverAnim)
                 {
@@ -1294,11 +1479,11 @@ namespace winrings
 
     void RingOverlay::HandleScrollWheel(int wheelDelta)
     {
-        if (!m_isOpen || m_visibleSlots.empty() || m_contextMenuOpen ||
+        if (!m_isOpen || (m_visibleSlots.empty() && m_rankedMatches.empty()) || m_contextMenuOpen ||
             m_config.scrollWheelMode == ScrollWheelBehavior::Disabled)
             return;
 
-        // When search is active, cycle through the ranked search matches (pinned/open ring items + top half-ring system apps)
+        // When search is active, cycle through the ranked search matches (pinned/open ring items + top half-ring apps)
         if (!m_filterQuery.empty())
         {
             if (m_rankedMatches.empty())
@@ -1320,7 +1505,7 @@ namespace winrings
                 m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
             for (size_t i = 0; i < m_submenuCards.size(); ++i)
                 m_submenuCards[i].currentScale = m_submenuCards[i].targetScale =
-                    (static_cast<int>(i) == m_selectedSubIndex) ? 1.12 : 1.0;
+                    (static_cast<int>(i) == m_selectedSubIndex) ? 1.18 : 1.0;
             Render();
             return;
         }
@@ -1391,6 +1576,11 @@ namespace winrings
             {
                 chosenSlotCopy = *card.subSlot;
                 hasSlot = true;
+                if (m_searchArcActive && !chosenSlotCopy.windows.empty())
+                {
+                    chosenWindowCopy = chosenSlotCopy.windows.front();
+                    hasWindow = true;
+                }
             }
             else if (card.window && m_expandedSlotIndex >= 0)
             {
@@ -1431,7 +1621,7 @@ namespace winrings
             return;
         }
         if (!slot->pathOrUrl.empty())
-            SlotModel::LaunchPathOrUrl(slot->pathOrUrl);
+            SlotModel::LaunchPathOrUrl(slot->pathOrUrl, slot->arguments, slot->runAsAdmin);
     }
 
     void RingOverlay::AppendFilterChar(wchar_t ch)
@@ -1457,6 +1647,8 @@ namespace winrings
         ClearSubmenu();
         m_visibleSlots = m_allSlots;
         m_slotSearchMatched.assign(m_visibleSlots.size(), true);
+        m_slotScales.assign(m_visibleSlots.size(), kIdleSlotScale);
+        m_lastWcaRegionHash = 0;
         m_rankedMatches.clear();
         m_rankedMatchCursor = -1;
 
@@ -1474,32 +1666,126 @@ namespace winrings
 
         std::unordered_set<std::wstring> excludeTargets;
         std::unordered_set<std::wstring> excludeNames;
+        auto addExcludeKey = [&](const std::wstring& rawTarget) {
+            if (rawTarget.empty())
+                return;
+            const std::wstring k1 = AppIndex::CanonicalPathKey(rawTarget);
+            if (!k1.empty())
+                excludeTargets.insert(k1);
+            const std::wstring k2 = CanonicalSearchKey(rawTarget);
+            if (!k2.empty())
+                excludeTargets.insert(k2);
+        };
+        auto isTargetExcluded = [&](const std::wstring& rawTarget) -> bool {
+            if (rawTarget.empty())
+                return false;
+            const std::wstring k1 = AppIndex::CanonicalPathKey(rawTarget);
+            if (!k1.empty() && excludeTargets.count(k1))
+                return true;
+            const std::wstring k2 = CanonicalSearchKey(rawTarget);
+            return !k2.empty() && excludeTargets.count(k2) != 0;
+        };
+
         for (size_t i = 0; i < m_visibleSlots.size(); ++i)
         {
             const auto& slot = m_visibleSlots[i];
-            if (!slot.pathOrUrl.empty())
-                excludeTargets.insert(AppIndex::CanonicalPathKey(slot.pathOrUrl));
+            addExcludeKey(slot.pathOrUrl);
             if (!slot.label.empty())
                 excludeNames.insert(ToLowerFold(slot.label));
             for (const auto& alias : slot.searchAliases)
                 excludeNames.insert(ToLowerFold(alias));
 
-            const int tier = ScoreAliases(slot.searchAliases, trimmed);
+            const int tier = ScoreSlotAliases(slot.searchAliases, slot.secondarySearchAliases, trimmed);
             const bool matched = (tier >= 0);
             m_slotSearchMatched[i] = matched;
             if (matched)
             {
                 m_rankedMatches.push_back(RankedMatch{
-                    true, static_cast<int>(i), tier, slot.label.size()
+                    true, static_cast<int>(i), tier, 0, slot.label.size()
                 });
+            }
+        }
+
+        struct SearchArcCandidate
+        {
+            RingSlot slot;
+            int tier = 99;
+            int sourcePriority = 2;
+        };
+        std::vector<SearchArcCandidate> arcCandidates;
+        IWICImagingFactory* wic = m_tracker ? m_tracker->WicFactory() : nullptr;
+
+        {
+            struct HiddenPinRef
+            {
+                const RingProfileConfig* prof = nullptr;
+                const PinnedSlotConfig* pin = nullptr;
+            };
+            std::vector<HiddenPinRef> matchedHidden;
+            std::unordered_set<std::wstring> seenHiddenKeys;
+
+            auto scanProfileHiddenPins = [&](const RingProfileConfig* prof) {
+                if (!prof)
+                    return;
+                for (const auto& item : prof->pinnedSlots)
+                {
+                    if (!item.hiddenFromRing)
+                        continue;
+                    const std::wstring expanded = SlotModel::ExpandEnv(item.pathOrUrl);
+                    const std::wstring k = CanonicalSearchKey(expanded);
+                    if (isTargetExcluded(expanded))
+                        continue;
+                    if (!k.empty() && seenHiddenKeys.count(k))
+                        continue;
+                    if (!item.label.empty() && excludeNames.count(ToLowerFold(item.label)))
+                        continue;
+
+                    std::vector<std::wstring> aliases = BuildBasicSearchAliases(item.label, expanded);
+                    if (item.kind == SlotKind::App && m_appIndex && !expanded.empty())
+                    {
+                        const std::wstring friendly = m_appIndex->FindFriendlyNameForExe(expanded);
+                        if (!friendly.empty())
+                            aliases.push_back(friendly);
+                    }
+                    if (ScoreAliases(aliases, trimmed) >= 0)
+                    {
+                        if (!k.empty())
+                            seenHiddenKeys.insert(k);
+                        matchedHidden.push_back(HiddenPinRef{ prof, &item });
+                    }
+                }
+            };
+
+            if (const RingProfileConfig* activeProf = m_config.FindProfile(m_activeProfileId))
+                scanProfileHiddenPins(activeProf);
+            for (const auto& prof : m_config.profiles)
+            {
+                if (_wcsicmp(prof.id.c_str(), m_activeProfileId.c_str()) != 0)
+                    scanProfileHiddenPins(&prof);
+            }
+
+            if (!matchedHidden.empty() && m_tracker)
+            {
+                const auto running = m_tracker->EnumerateGroupedWindows(m_hwnd);
+                for (const auto& ref : matchedHidden)
+                {
+                    RingSlot s = SlotModel::BuildSearchSlot(
+                        *ref.pin, running, *m_tracker, wic, m_appIndex, ref.prof->id);
+                    const int tier = ScoreSlotAliases(s.searchAliases, s.secondarySearchAliases, trimmed);
+                    if (tier < 0)
+                        continue;
+                    addExcludeKey(s.pathOrUrl);
+                    if (!s.label.empty())
+                        excludeNames.insert(ToLowerFold(s.label));
+                    arcCandidates.push_back(SearchArcCandidate{ std::move(s), tier, 1 });
+                }
             }
         }
 
         if (m_appIndex)
         {
-            IWICImagingFactory* wic = m_tracker ? m_tracker->WicFactory() : nullptr;
             const auto foundApps = m_appIndex->Search(trimmed, excludeTargets, excludeNames, 9, wic);
-            m_searchResultSlots.reserve(foundApps.size());
+            arcCandidates.reserve(arcCandidates.size() + foundApps.size());
             for (size_t j = 0; j < foundApps.size(); ++j)
             {
                 const auto& app = foundApps[j];
@@ -1510,21 +1796,41 @@ namespace winrings
                 s.pathOrUrl = app.launchTarget;
                 s.iconBitmap = app.iconBitmap;
                 s.isPinned = false;
-                m_searchResultSlots.push_back(std::move(s));
+                s.isHiddenPin = false;
 
                 const int sysTier = ScoreAliases(app.aliases, trimmed);
-                m_rankedMatches.push_back(RankedMatch{
-                    false, static_cast<int>(j), (sysTier >= 0 ? sysTier : 3), app.name.size()
+                arcCandidates.push_back(SearchArcCandidate{
+                    std::move(s), (sysTier >= 0 ? sysTier : 3), 2
                 });
             }
         }
 
-        std::sort(m_rankedMatches.begin(), m_rankedMatches.end(), [&](const RankedMatch& a, const RankedMatch& b) {
-            if (a.tier != b.tier)
-                return a.tier < b.tier;
-            if (a.isRingSlot != b.isRingSlot)
-                return a.isRingSlot; // Pinned & running main-ring apps win ties over external system apps!
-            return a.nameLen < b.nameLen;
+        std::sort(arcCandidates.begin(), arcCandidates.end(), [](const SearchArcCandidate& a, const SearchArcCandidate& b) {
+            const SearchRankKey ka{ a.tier, a.sourcePriority, a.slot.label.size() };
+            const SearchRankKey kb{ b.tier, b.sourcePriority, b.slot.label.size() };
+            if (CompareSearchRankKey(ka, kb)) return true;
+            if (CompareSearchRankKey(kb, ka)) return false;
+            return _wcsicmp(a.slot.label.c_str(), b.slot.label.c_str()) < 0;
+        });
+
+        const size_t arcLimit = (std::min)(size_t{ 9 }, arcCandidates.size());
+        m_searchResultSlots.reserve(arcLimit);
+        for (size_t j = 0; j < arcLimit; ++j)
+        {
+            const size_t idx = m_searchResultSlots.size();
+            m_searchResultSlots.push_back(std::move(arcCandidates[j].slot));
+            m_rankedMatches.push_back(RankedMatch{
+                false, static_cast<int>(idx), arcCandidates[j].tier, arcCandidates[j].sourcePriority,
+                m_searchResultSlots[idx].label.size()
+            });
+        }
+
+        std::sort(m_rankedMatches.begin(), m_rankedMatches.end(), [](const RankedMatch& a, const RankedMatch& b) {
+            const SearchRankKey ka{ a.tier, a.sourcePriority, a.nameLen };
+            const SearchRankKey kb{ b.tier, b.sourcePriority, b.nameLen };
+            if (CompareSearchRankKey(ka, kb)) return true;
+            if (CompareSearchRankKey(kb, ka)) return false;
+            return false;
         });
 
         if (!m_searchResultSlots.empty())
@@ -1563,7 +1869,7 @@ namespace winrings
                 m_selectedIndex = -1;
                 m_selectedSubIndex = best.index;
                 if (m_selectedSubIndex >= 0 && m_selectedSubIndex < static_cast<int>(m_submenuCards.size()))
-                    m_submenuCards[static_cast<size_t>(m_selectedSubIndex)].targetScale = 1.12;
+                    m_submenuCards[static_cast<size_t>(m_selectedSubIndex)].targetScale = 1.18;
             }
         }
         else
@@ -1573,11 +1879,21 @@ namespace winrings
         }
 
         m_searchMouseLocked = true;
+        POINT anchorScreen{};
+        if (m_hasLastPointer)
+        {
+            anchorScreen = m_lastPointerPhysical;
+        }
+        else if (GetCursorPos(&anchorScreen))
+        {
+            m_lastPointerPhysical = anchorScreen;
+            m_hasLastPointer = true;
+        }
         if (m_hasLastPointer)
         {
             m_searchMouseAnchorDip = {
-                kCenterDip + (m_lastPointerPhysical.x - m_centerScreenPhysical.x) / m_dpiScale,
-                kCenterDip + (m_lastPointerPhysical.y - m_centerScreenPhysical.y) / m_dpiScale
+                kCenterDip + (anchorScreen.x - m_centerScreenPhysical.x) / m_dpiScale,
+                kCenterDip + (anchorScreen.y - m_centerScreenPhysical.y) / m_dpiScale
             };
         }
         else
@@ -1691,7 +2007,8 @@ namespace winrings
         if (m_reorderActive && m_reorderCurrentIndex >= 0 &&
             m_reorderCurrentIndex < static_cast<int>(m_visibleSlots.size()))
         {
-            return L"Move: " + m_visibleSlots[static_cast<size_t>(m_reorderCurrentIndex)].label;
+            return (m_reorderWasUnpinned ? L"Pin & Move: " : L"Move: ") +
+                m_visibleSlots[static_cast<size_t>(m_reorderCurrentIndex)].label;
         }
         if (m_dragActive)
         {
@@ -1841,11 +2158,7 @@ namespace winrings
             m_d2dContext->FillGeometry(arcGeo, m_noiseBrush.Get());
         if (m_wcaBackdropActive)
         {
-            const D2D1_COLOR_F edgeBridge = (m_config.theme == RingTheme::Blue)
-                ? D2D1::ColorF(tc.tintR, tc.tintG, tc.tintB, 0.88f)
-                : (tc.isLightText ? D2D1::ColorF(34.0f / 255.0f, 34.0f / 255.0f, 36.0f / 255.0f, 0.88f)
-                                  : D2D1::ColorF(236.0f / 255.0f, 236.0f / 255.0f, 240.0f / 255.0f, 0.88f));
-            if (auto eb = mkBrush(edgeBridge))
+            if (auto eb = mkBrush(tc.edgeBridgeColor))
                 m_d2dContext->DrawGeometry(arcGeo, eb.Get(), 2.2f);
         }
         if (auto b = mkBrush(tc.ringStroke))
@@ -1859,14 +2172,22 @@ namespace winrings
         if (!m_d2dContext || !m_targetBitmap || !m_swapChain)
             return;
 
-        const ThemeColors tc = BuildThemeColors();
-        const bool wcaActive = m_wcaBackdropActive && m_wcaBackdropHwnd != nullptr;
-        const bool acrylicActive = !wcaActive && m_acrylicBackdrop.IsActive() && m_maskSwapChain && m_maskTargetBitmap;
+        const SwitcherConfig effCfg = ResolveEffectiveConfigForSystem(m_config);
+        SyncBackdropBackend(effCfg.surfaceTexture, effCfg);
+        const ThemeColors tc = ComputeRingMaterial(effCfg, m_dpiScale);
+        const bool wcaActive = (m_activeBackend == ActiveBackdropBackend::WcaDualHwnd) &&
+            m_wcaBackdropActive && m_wcaBackdropHwnd != nullptr;
+        const bool acrylicActive = (m_activeBackend == ActiveBackdropBackend::TaskbarComposition) &&
+            m_acrylicBackdrop.IsActive() && m_maskSwapChain && m_maskTargetBitmap;
         const bool hasLiveBackdrop = wcaActive || acrylicActive;
         if (wcaActive)
             UpdateWcaMaterial(tc);
         else if (acrylicActive)
-            m_acrylicBackdrop.UpdateMaterial(BuildAcrylicMaterial());
+        {
+            AcrylicMaterialParams p = AcrylicParamsFromMaterial(tc);
+            p.blurSigma *= static_cast<float>((std::max)(1.0, m_dpiScale));
+            m_acrylicBackdrop.UpdateMaterial(p);
+        }
 
         const RingGeometry geom = ActiveGeometry();
         const float dpiScale = static_cast<float>(m_dpiScale);
@@ -2024,11 +2345,7 @@ namespace winrings
         // then layer a subtle top-lit 3D glass bezel + soft drop-edge shadow lip on outer and inner circles.
         if (wcaActive)
         {
-            const D2D1_COLOR_F bridgeCol = (m_config.theme == RingTheme::Blue)
-                ? D2D1::ColorF(tc.tintR, tc.tintG, tc.tintB, 0.90f)
-                : (tc.isLightText ? D2D1::ColorF(34.0f / 255.0f, 34.0f / 255.0f, 36.0f / 255.0f, 0.90f)
-                                  : D2D1::ColorF(236.0f / 255.0f, 236.0f / 255.0f, 240.0f / 255.0f, 0.90f));
-            if (auto br = mkBrush(bridgeCol))
+            if (auto br = mkBrush(tc.edgeBridgeColor))
             {
                 m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - 0.9f, outerR - 0.9f), br.Get(), 2.0f);
                 m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + 0.9f, holeR + 0.9f), br.Get(), 2.0f);
@@ -2059,20 +2376,8 @@ namespace winrings
             return lgb;
         };
 
-        const D2D1_COLOR_F outerTop = (m_config.theme == RingTheme::Blue)
-            ? D2D1::ColorF(132.0f / 255.0f, 198.0f / 255.0f, 1.0f, 0.62f)
-            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.25f)
-                              : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f));
-        const D2D1_COLOR_F outerMid = (m_config.theme == RingTheme::Blue)
-            ? tc.ringStroke
-            : (tc.isLightText ? D2D1::ColorF(118.0f / 255.0f, 118.0f / 255.0f, 124.0f / 255.0f, 0.42f)
-                              : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.55f));
-        const D2D1_COLOR_F outerBot = (m_config.theme == RingTheme::Blue)
-            ? D2D1::ColorF(52.0f / 255.0f, 120.0f / 255.0f, 230.0f / 255.0f, 0.34f)
-            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f)
-                              : D2D1::ColorF(120.0f / 255.0f, 126.0f / 255.0f, 138.0f / 255.0f, 0.42f));
-
-        if (auto outerGrad = makeRimGradient(centerPt.y - outerR, centerPt.y + outerR, outerTop, outerMid, outerBot))
+        if (auto outerGrad = makeRimGradient(centerPt.y - outerR, centerPt.y + outerR,
+            tc.outerBezelTop, tc.outerBezelMid, tc.outerBezelBot))
         {
             constexpr float kOuterRimW = 1.05f;
             m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, outerR - kOuterRimW * 0.5f, outerR - kOuterRimW * 0.5f),
@@ -2080,20 +2385,8 @@ namespace winrings
         }
 
         // Optically recessed inner bevel (softer shadow at 12 o'clock, gentle catch-light at 6 o'clock)
-        const D2D1_COLOR_F innerTop = (m_config.theme == RingTheme::Blue)
-            ? D2D1::ColorF(48.0f / 255.0f, 110.0f / 255.0f, 210.0f / 255.0f, 0.28f)
-            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.07f)
-                              : D2D1::ColorF(110.0f / 255.0f, 116.0f / 255.0f, 126.0f / 255.0f, 0.34f));
-        const D2D1_COLOR_F innerMid = (m_config.theme == RingTheme::Blue)
-            ? tc.innerRimStroke
-            : (tc.isLightText ? D2D1::ColorF(108.0f / 255.0f, 108.0f / 255.0f, 114.0f / 255.0f, 0.32f)
-                              : D2D1::ColorF(170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.45f));
-        const D2D1_COLOR_F innerBot = (m_config.theme == RingTheme::Blue)
-            ? D2D1::ColorF(126.0f / 255.0f, 190.0f / 255.0f, 1.0f, 0.48f)
-            : (tc.isLightText ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.20f)
-                              : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.72f));
-
-        if (auto innerGrad = makeRimGradient(centerPt.y - holeR, centerPt.y + holeR, innerTop, innerMid, innerBot))
+        if (auto innerGrad = makeRimGradient(centerPt.y - holeR, centerPt.y + holeR,
+            tc.innerBezelTop, tc.innerBezelMid, tc.innerBezelBot))
         {
             constexpr float kInnerRimW = 0.95f;
             m_d2dContext->DrawEllipse(D2D1::Ellipse(centerPt, holeR + kInnerRimW * 0.5f, holeR + kInnerRimW * 0.5f),
@@ -2286,12 +2579,25 @@ namespace winrings
                     if (sel)
                     {
                         const D2D1_POINT_2F cc{ cx, cy };
-                        const float hoverR = (std::max)(hw, hh) + 4.0f;
-                        D2D1_COLOR_F haloFill = tc.slotSelectedFill;
-                        if (auto b = mkBrush(haloFill))
+                        const float hoverR = (std::max)(hw, hh) + 2.5f;
+                        D2D1_COLOR_F g0 = tc.hoverRevealColor; g0.a = (m_config.theme == RingTheme::A4S) ? 0.34f : 0.40f;
+                        D2D1_COLOR_F g1 = tc.hoverRevealColor; g1.a = 0.0f;
+                        D2D1_GRADIENT_STOP stops[2] = { { 0.0f, g0 }, { 1.0f, g1 } };
+                        Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> gsc;
+                        if (SUCCEEDED(m_d2dContext->CreateGradientStopCollection(stops, 2, gsc.GetAddressOf())))
+                        {
+                            Microsoft::WRL::ComPtr<ID2D1RadialGradientBrush> glow;
+                            const float gr = hoverR * 1.45f;
+                            if (SUCCEEDED(m_d2dContext->CreateRadialGradientBrush(
+                                D2D1::RadialGradientBrushProperties(cc, D2D1::Point2F(0, 0), gr, gr), gsc.Get(), glow.GetAddressOf())))
+                            {
+                                m_d2dContext->FillEllipse(D2D1::Ellipse(cc, gr, gr), glow.Get());
+                            }
+                        }
+                        if (auto b = mkBrush(tc.slotSelectedFill))
                             m_d2dContext->FillEllipse(D2D1::Ellipse(cc, hoverR, hoverR), b.Get());
-                        if (auto b = mkBrush(tc.sectorStroke))
-                            m_d2dContext->DrawEllipse(D2D1::Ellipse(cc, hoverR, hoverR), b.Get(), tc.hairlineWidth);
+                        if (auto b = mkBrush(tc.hoverRim))
+                            m_d2dContext->DrawEllipse(D2D1::Ellipse(cc, hoverR, hoverR), b.Get(), 1.4f);
                     }
                     if (card.subSlot->iconBitmap)
                     {
@@ -2430,167 +2736,433 @@ namespace winrings
             m_dcompDevice->Commit();
     }
 
-    void RingOverlay::ShowContextMenuAt(POINT screenPt)
+    std::vector<PinnedSlotConfig>& RingOverlay::ActiveProfilePins() noexcept
     {
-        if (!m_hwnd)
+        if (RingProfileConfig* p = m_config.FindProfile(m_activeProfileId))
+            return p->pinnedSlots;
+        return m_config.pinnedSlots;
+    }
+
+    void RingOverlay::ShowContextMenuAt(POINT initialScreenPt)
+    {
+        if (!m_hwnd || m_contextMenuOpen)
             return;
-        ClearSubmenu();
-        m_contextMenuOpen = true;
 
-        HMENU menu = CreatePopupMenu();
-        if (!menu)
+        POINT screenPt = initialScreenPt;
+        for (;;)
         {
-            m_contextMenuOpen = false;
-            return;
-        }
+            m_pendingContextMenu = false;
+            m_contextMenuOpen = true;
 
-        enum MenuCmd
-        {
-            CmdWinBase = 100,
-            CmdNewWindow = 200,
-            CmdMinAll = 201,
-            CmdCloseAll = 202,
-            CmdOpenLocation = 203,
-            CmdShowInExplorer = 204,
-            CmdTogglePin = 205,
-            CmdEmptyRecycleBin = 206,
-            CmdNewCollection = 300,
-            CmdSettings = 302,
-            CmdExit = 303
-        };
+            POINT clientPt = screenPt;
+            ScreenToClient(m_hwnd, &clientPt);
+            const PointD localDip{ clientPt.x / m_dpiScale, clientPt.y / m_dpiScale };
 
-        RingSlot targetSlot;
-        const bool hasSlot = (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_visibleSlots.size()));
-        if (hasSlot)
-        {
-            targetSlot = m_visibleSlots[static_cast<size_t>(m_selectedIndex)];
-            if (!targetSlot.windows.empty())
+            RingSlot targetSearchSlot;
+            bool hasSearchSlot = false;
+            if (m_searchArcActive)
             {
-                const size_t limit = (std::min)(targetSlot.windows.size(), size_t{ 9 });
-                for (size_t i = 0; i < limit; ++i)
-                    AppendMenuW(menu, MF_STRING, CmdWinBase + i, targetSlot.windows[i].title.c_str());
-                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                const int hitSub = HitTestSubmenu(localDip);
+                if (hitSub >= 0 && hitSub < static_cast<int>(m_submenuCards.size()) &&
+                    m_submenuCards[static_cast<size_t>(hitSub)].subSlot)
+                {
+                    targetSearchSlot = *m_submenuCards[static_cast<size_t>(hitSub)].subSlot;
+                    hasSearchSlot = true;
+                }
             }
-            if (targetSlot.kind == SlotKind::App)
+            else
             {
-                AppendMenuW(menu, MF_STRING, CmdNewWindow, L"New Window");
+                ClearSubmenu();
+            }
+
+            enum MenuCmd : UINT
+            {
+                CmdWinBase = 100,
+                CmdNewWindow = 200,
+                CmdMinAll = 201,
+                CmdEndTask = 202,
+                CmdCloseAll = 203,
+                CmdOpenLocation = 204,
+                CmdShowInExplorer = 205,
+                CmdTogglePin = 206,
+                CmdEmptyRecycleBin = 207,
+                CmdToggleRunAsAdmin = 211,
+                CmdMoveToSearchOnly = 212,
+                CmdAddToSearchOnly = 213,
+                CmdPinFromSearch = 214,
+                CmdRemoveFromSearch = 215,
+                CmdSettings = 302,
+                CmdExit = 303
+            };
+
+            std::vector<ContextFlyoutItem> items;
+            auto addSep = [&]() {
+                if (!items.empty() && !items.back().isSeparator)
+                    items.push_back(ContextFlyoutItem{ 0, L"", ContextIcon::None, true, false });
+            };
+
+            auto findPinnedConfig = [&](const std::wstring& slotId) -> PinnedSlotConfig* {
+                for (auto& p : ActiveProfilePins())
+                {
+                    if (p.id == slotId)
+                        return &p;
+                }
+                return nullptr;
+            };
+            auto findHiddenPinConfig = [&](const std::wstring& slotId, const std::wstring& profileId, RingProfileConfig** outProfile = nullptr) -> PinnedSlotConfig* {
+                if (!profileId.empty())
+                {
+                    if (RingProfileConfig* prof = m_config.FindProfile(profileId))
+                    {
+                        for (auto& p : prof->pinnedSlots)
+                        {
+                            if (p.id == slotId)
+                            {
+                                if (outProfile)
+                                    *outProfile = prof;
+                                return &p;
+                            }
+                        }
+                    }
+                }
+                for (auto& prof : m_config.profiles)
+                {
+                    for (auto& p : prof.pinnedSlots)
+                    {
+                        if (p.id == slotId)
+                        {
+                            if (outProfile)
+                                *outProfile = &prof;
+                            return &p;
+                        }
+                    }
+                }
+                return nullptr;
+            };
+            auto appendAdminAction = [&](const PinnedSlotConfig* cfg) {
+                if (cfg && CanSlotToggleRunAsAdmin(cfg->kind, cfg->pathOrUrl))
+                {
+                    addSep();
+                    items.push_back(ContextFlyoutItem{
+                        CmdToggleRunAsAdmin,
+                        cfg->runAsAdmin ? L"Run normally (remove Admin)" : L"Run as administrator",
+                        ContextIcon::AdminShield,
+                        false, false
+                    });
+                }
+            };
+
+            int clickedSlotIdx = -1;
+            if (!hasSearchSlot && !m_visibleSlots.empty())
+            {
+                clickedSlotIdx = CalculateSectorIndex(
+                    localDip.x - kCenterDip, localDip.y - kCenterDip,
+                    static_cast<int>(m_visibleSlots.size()), m_config.deadzoneDip);
+                if (clickedSlotIdx != m_selectedIndex)
+                {
+                    m_selectedIndex = clickedSlotIdx;
+                    for (size_t i = 0; i < m_slotScales.size(); ++i)
+                        m_slotScales[i] = (static_cast<int>(i) == m_selectedIndex) ? kSelectedSlotScale : kIdleSlotScale;
+                    Render();
+                }
+            }
+
+            RingSlot targetSlot;
+            const bool hasSlot = !hasSearchSlot && (clickedSlotIdx >= 0 && clickedSlotIdx < static_cast<int>(m_visibleSlots.size()));
+            if (hasSearchSlot)
+            {
+                items.push_back(ContextFlyoutItem{ CmdNewWindow, L"Open", ContextIcon::NewWindow, false, false });
+                const std::wstring lowTgt = ToLowerFold(targetSearchSlot.pathOrUrl);
+                const bool isLocalTarget = !targetSearchSlot.pathOrUrl.empty() &&
+                    lowTgt.rfind(L"http://", 0) != 0 &&
+                    lowTgt.rfind(L"https://", 0) != 0 &&
+                    lowTgt.rfind(L"shell:", 0) != 0 &&
+                    lowTgt.rfind(L"ms-settings:", 0) != 0 &&
+                    lowTgt.rfind(L"winrings://", 0) != 0;
+                if (isLocalTarget)
+                    items.push_back(ContextFlyoutItem{ CmdOpenLocation, L"Open file location", ContextIcon::Folder, false, false });
+                addSep();
+                items.push_back(ContextFlyoutItem{
+                    CmdPinFromSearch,
+                    targetSearchSlot.isHiddenPin ? L"Show on ring (unhide)" : L"Pin to ring",
+                    ContextIcon::Pin,
+                    false,
+                    false });
+                if (targetSearchSlot.isHiddenPin)
+                {
+                    appendAdminAction(findHiddenPinConfig(targetSearchSlot.id, targetSearchSlot.sourceProfileId));
+                    addSep();
+                    items.push_back(ContextFlyoutItem{ CmdRemoveFromSearch, L"Remove from profile", ContextIcon::Trash, false, true });
+                }
+            }
+            else if (hasSlot)
+            {
+                targetSlot = m_visibleSlots[static_cast<size_t>(clickedSlotIdx)];
                 if (!targetSlot.windows.empty())
                 {
-                    AppendMenuW(menu, MF_STRING, CmdMinAll, L"Minimize All");
-                    AppendMenuW(menu, MF_STRING, CmdCloseAll, L"Close All");
+                    const size_t limit = (std::min)(targetSlot.windows.size(), size_t{ 9 });
+                    for (size_t i = 0; i < limit; ++i)
+                        items.push_back(ContextFlyoutItem{ CmdWinBase + static_cast<UINT>(i), targetSlot.windows[i].title, ContextIcon::WindowDot, false, false });
+                    addSep();
                 }
+
+                if (targetSlot.kind == SlotKind::App)
+                {
+                    items.push_back(ContextFlyoutItem{ CmdNewWindow, L"New window", ContextIcon::NewWindow, false, false });
+                    if (!targetSlot.windows.empty())
+                    {
+                        items.push_back(ContextFlyoutItem{ CmdMinAll, targetSlot.windows.size() > 1 ? L"Minimize all" : L"Minimize window", ContextIcon::WindowDot, false, false });
+                        items.push_back(ContextFlyoutItem{ CmdEndTask, L"End task", ContextIcon::EndTask, false, true });
+                        items.push_back(ContextFlyoutItem{ CmdCloseAll, targetSlot.windows.size() > 1 ? L"Close all windows" : L"Close window", ContextIcon::CloseWindow, false, false });
+                    }
+                    if (!targetSlot.pathOrUrl.empty())
+                    {
+                        addSep();
+                        items.push_back(ContextFlyoutItem{ CmdOpenLocation, L"Open file location", ContextIcon::Folder, false, false });
+                        items.push_back(ContextFlyoutItem{
+                            CmdTogglePin,
+                            targetSlot.isPinned ? L"Unpin from ring" : L"Pin to ring",
+                            targetSlot.isPinned ? ContextIcon::Unpin : ContextIcon::Pin,
+                            false, false
+                        });
+                        items.push_back(ContextFlyoutItem{
+                            targetSlot.isPinned ? CmdMoveToSearchOnly : CmdAddToSearchOnly,
+                            targetSlot.isPinned ? L"Hide from ring (search only)" : L"Add to search only",
+                            ContextIcon::Search,
+                            false, false
+                        });
+                    }
+                }
+                else if (targetSlot.kind == SlotKind::File || targetSlot.kind == SlotKind::Folder || targetSlot.kind == SlotKind::Script)
+                {
+                    if (!targetSlot.windows.empty())
+                    {
+                        items.push_back(ContextFlyoutItem{ CmdCloseAll, targetSlot.windows.size() > 1 ? L"Close all windows" : L"Close window", ContextIcon::CloseWindow, false, false });
+                        addSep();
+                    }
+                    items.push_back(ContextFlyoutItem{ CmdShowInExplorer, L"Show in Explorer", ContextIcon::Folder, false, false });
+                    if (targetSlot.isPinned)
+                    {
+                        items.push_back(ContextFlyoutItem{ CmdTogglePin, L"Unpin from ring", ContextIcon::Unpin, false, false });
+                        items.push_back(ContextFlyoutItem{ CmdMoveToSearchOnly, L"Hide from ring (search only)", ContextIcon::Search, false, false });
+                    }
+                }
+                else if (targetSlot.kind == SlotKind::RecycleBin)
+                {
+                    items.push_back(ContextFlyoutItem{ CmdEmptyRecycleBin, L"Empty Recycle Bin", ContextIcon::Trash, false, false });
+                }
+                else if (targetSlot.isPinned)
+                {
+                    items.push_back(ContextFlyoutItem{ CmdTogglePin, L"Unpin from ring", ContextIcon::Unpin, false, false });
+                    if (targetSlot.kind != SlotKind::Collection)
+                        items.push_back(ContextFlyoutItem{ CmdMoveToSearchOnly, L"Hide from ring (search only)", ContextIcon::Search, false, false });
+                }
+
+                if (targetSlot.isPinned)
+                    appendAdminAction(findPinnedConfig(targetSlot.id));
+            }
+            else
+            {
+                items.push_back(ContextFlyoutItem{ CmdSettings, L"WinRings Control...", ContextIcon::Settings, false, false });
+                addSep();
+                items.push_back(ContextFlyoutItem{ CmdExit, L"Exit WinRings", ContextIcon::Exit, false, true });
+            }
+
+            const UINT cmd = ShowContextFlyout(m_instance, m_hwnd, screenPt, items);
+            if (!m_isOpen)
+            {
+                m_contextMenuOpen = false;
+                m_pendingContextMenu = false;
+                return;
+            }
+            if (cmd == 0)
+            {
+                if (m_pendingContextMenu)
+                {
+                    screenPt = m_pendingContextMenuPt;
+                    continue;
+                }
+                m_contextMenuOpen = false;
+                return;
+            }
+
+            m_contextMenuOpen = false;
+            m_pendingContextMenu = false;
+
+            if (hasSlot && cmd >= CmdWinBase && cmd < CmdWinBase + 9)
+            {
+                const size_t idx = cmd - CmdWinBase;
+                if (idx < targetSlot.windows.size() && m_tracker)
+                {
+                    const HWND winHwnd = targetSlot.windows[idx].hwnd;
+                    Dismiss();
+                    m_tracker->ActivateWindow(winHwnd, false, m_config.pointerFollow);
+                }
+                return;
+            }
+
+            const RingSlot& actionSlot = hasSearchSlot ? targetSearchSlot : targetSlot;
+            PinnedSlotConfig* editableCfg = (hasSearchSlot && targetSearchSlot.isHiddenPin)
+                ? findHiddenPinConfig(actionSlot.id, targetSearchSlot.sourceProfileId)
+                : findPinnedConfig(actionSlot.id);
+            auto saveAndReload = [&]() {
+                m_config.PullFromDefaultProfileMirror();
+                if (m_callbacks.saveAndReloadConfig)
+                    m_callbacks.saveAndReloadConfig(m_config);
+            };
+            auto addHiddenPinUnique = [&](PinnedSlotConfig entry) {
+                entry.hiddenFromRing = true;
+                const std::wstring newKey = CanonicalSearchKey(SlotModel::ExpandEnv(entry.pathOrUrl));
+                if (!newKey.empty())
+                {
+                    for (auto& existing : ActiveProfilePins())
+                    {
+                        if (CanonicalSearchKey(SlotModel::ExpandEnv(existing.pathOrUrl)) == newKey)
+                        {
+                            existing.hiddenFromRing = true;
+                            return;
+                        }
+                    }
+                }
+                ActiveProfilePins().push_back(std::move(entry));
+            };
+
+            switch (cmd)
+            {
+            case CmdNewWindow:
+                Dismiss();
+                SlotModel::LaunchPathOrUrl(actionSlot.pathOrUrl, actionSlot.arguments, actionSlot.runAsAdmin);
+                break;
+            case CmdMinAll:
+                for (const auto& w : targetSlot.windows) WindowTracker::MinimizeWindow(w.hwnd);
+                Dismiss();
+                break;
+            case CmdEndTask:
+                Dismiss();
+                WindowTracker::EndTaskForWindows(targetSlot.windows);
+                break;
+            case CmdCloseAll:
+                for (const auto& w : targetSlot.windows) WindowTracker::CloseWindow(w.hwnd);
+                Dismiss();
+                break;
+            case CmdOpenLocation:
+            case CmdShowInExplorer:
+                Dismiss();
+                SlotModel::RevealInExplorer(actionSlot.pathOrUrl);
+                break;
+            case CmdEmptyRecycleBin:
+                Dismiss();
+                SlotModel::EmptyRecycleBin(nullptr);
+                break;
+            case CmdTogglePin:
+            {
+                auto& pins = ActiveProfilePins();
+                if (targetSlot.isPinned)
+                {
+                    pins.erase(
+                        std::remove_if(pins.begin(), pins.end(),
+                            [&](const PinnedSlotConfig& p) { return p.id == targetSlot.id; }),
+                        pins.end());
+                }
+                else if (!targetSlot.pathOrUrl.empty())
+                {
+                    PinnedSlotConfig p;
+                    p.id = L"pin-" + std::to_wstring(GetTickCount64());
+                    p.kind = SlotKind::App;
+                    p.label = targetSlot.label;
+                    p.pathOrUrl = targetSlot.pathOrUrl;
+                    pins.push_back(std::move(p));
+                }
+                saveAndReload();
+                break;
+            }
+            case CmdMoveToSearchOnly:
+                if (PinnedSlotConfig* pCfg = findPinnedConfig(targetSlot.id))
+                {
+                    pCfg->hiddenFromRing = true;
+                    saveAndReload();
+                }
+                break;
+            case CmdAddToSearchOnly:
                 if (!targetSlot.pathOrUrl.empty())
                 {
-                    AppendMenuW(menu, MF_STRING, CmdOpenLocation, L"Open File Location");
-                    AppendMenuW(menu, MF_STRING, CmdTogglePin,
-                        targetSlot.isPinned ? L"Unpin from Ring" : L"Pin to Ring");
+                    PinnedSlotConfig s;
+                    s.id = L"pin-" + std::to_wstring(GetTickCount64());
+                    s.kind = targetSlot.kind;
+                    s.label = targetSlot.label;
+                    s.pathOrUrl = targetSlot.pathOrUrl;
+                    s.runAsAdmin = targetSlot.runAsAdmin;
+                    s.arguments = targetSlot.arguments;
+                    s.hiddenFromRing = true;
+                    addHiddenPinUnique(std::move(s));
+                    saveAndReload();
                 }
-            }
-            else if (targetSlot.kind == SlotKind::File || targetSlot.kind == SlotKind::Folder || targetSlot.kind == SlotKind::Script)
-            {
-                AppendMenuW(menu, MF_STRING, CmdShowInExplorer, L"Show in Explorer");
-                if (targetSlot.isPinned)
-                    AppendMenuW(menu, MF_STRING, CmdTogglePin, L"Unpin from Ring");
-            }
-            else if (targetSlot.kind == SlotKind::RecycleBin)
-            {
-                AppendMenuW(menu, MF_STRING, CmdEmptyRecycleBin, L"Empty Recycle Bin");
-            }
-            else if (targetSlot.isPinned)
-            {
-                AppendMenuW(menu, MF_STRING, CmdTogglePin, L"Unpin from Ring");
-            }
-        }
-        else
-        {
-            AppendMenuW(menu, MF_STRING, CmdNewCollection, L"New Collection...");
-            AppendMenuW(menu, MF_STRING, CmdSettings, L"Settings...");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, CmdExit, L"Exit WinRings");
-        }
-
-        SetForegroundWindow(m_hwnd);
-        const UINT cmd = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPt.x, screenPt.y, m_hwnd, nullptr);
-        DestroyMenu(menu);
-        PostMessageW(m_hwnd, WM_NULL, 0, 0);
-        m_contextMenuOpen = false;
-
-        if (cmd == 0)
-            return;
-
-        if (hasSlot && cmd >= CmdWinBase && cmd < CmdWinBase + 9)
-        {
-            const size_t idx = cmd - CmdWinBase;
-            if (idx < targetSlot.windows.size() && m_tracker)
-            {
-                const HWND winHwnd = targetSlot.windows[idx].hwnd;
+                break;
+            case CmdPinFromSearch:
+                if (targetSearchSlot.isHiddenPin)
+                {
+                    RingProfileConfig* ownerProf = nullptr;
+                    if (PinnedSlotConfig* sCfg = findHiddenPinConfig(targetSearchSlot.id, targetSearchSlot.sourceProfileId, &ownerProf))
+                    {
+                        sCfg->hiddenFromRing = false;
+                        auto& activePins = ActiveProfilePins();
+                        if (ownerProf && &ownerProf->pinnedSlots != &activePins)
+                        {
+                            PinnedSlotConfig moved = *sCfg;
+                            auto& ownerPins = ownerProf->pinnedSlots;
+                            ownerPins.erase(
+                                std::remove_if(ownerPins.begin(), ownerPins.end(),
+                                    [&](const PinnedSlotConfig& p) { return p.id == targetSearchSlot.id; }),
+                                ownerPins.end());
+                            activePins.push_back(std::move(moved));
+                        }
+                        saveAndReload();
+                    }
+                }
+                else if (!targetSearchSlot.pathOrUrl.empty())
+                {
+                    PinnedSlotConfig p;
+                    p.id = L"pin-" + std::to_wstring(GetTickCount64());
+                    p.kind = targetSearchSlot.kind;
+                    p.label = targetSearchSlot.label;
+                    p.pathOrUrl = targetSearchSlot.pathOrUrl;
+                    p.runAsAdmin = targetSearchSlot.runAsAdmin;
+                    p.hiddenFromRing = false;
+                    ActiveProfilePins().push_back(std::move(p));
+                    saveAndReload();
+                }
+                break;
+            case CmdRemoveFromSearch:
+                if (targetSearchSlot.isHiddenPin)
+                {
+                    RingProfileConfig* ownerProf = nullptr;
+                    if (findHiddenPinConfig(targetSearchSlot.id, targetSearchSlot.sourceProfileId, &ownerProf) && ownerProf)
+                    {
+                        auto& pins = ownerProf->pinnedSlots;
+                        pins.erase(
+                            std::remove_if(pins.begin(), pins.end(),
+                                [&](const PinnedSlotConfig& s) { return s.id == targetSearchSlot.id; }),
+                            pins.end());
+                        saveAndReload();
+                    }
+                }
+                break;
+            case CmdToggleRunAsAdmin:
+                if (editableCfg)
+                {
+                    editableCfg->runAsAdmin = !editableCfg->runAsAdmin;
+                    saveAndReload();
+                }
+                break;
+            case CmdSettings:
                 Dismiss();
-                m_tracker->ActivateWindow(winHwnd, false, m_config.pointerFollow);
+                if (m_callbacks.launchTools) m_callbacks.launchTools(L"--open");
+                break;
+            case CmdExit:
+                Dismiss();
+                if (m_callbacks.onExitRequested) m_callbacks.onExitRequested();
+                break;
             }
-            return;
-        }
-
-        switch (cmd)
-        {
-        case CmdNewWindow:
-            Dismiss();
-            SlotModel::LaunchPathOrUrl(targetSlot.pathOrUrl);
-            break;
-        case CmdMinAll:
-            for (const auto& w : targetSlot.windows) WindowTracker::MinimizeWindow(w.hwnd);
-            Dismiss();
-            break;
-        case CmdCloseAll:
-            for (const auto& w : targetSlot.windows) WindowTracker::CloseWindow(w.hwnd);
-            Dismiss();
-            break;
-        case CmdOpenLocation:
-        case CmdShowInExplorer:
-            Dismiss();
-            SlotModel::RevealInExplorer(targetSlot.pathOrUrl);
-            break;
-        case CmdEmptyRecycleBin:
-            Dismiss();
-            SlotModel::EmptyRecycleBin(nullptr);
-            break;
-        case CmdTogglePin:
-            if (targetSlot.isPinned)
-            {
-                m_config.pinnedSlots.erase(
-                    std::remove_if(m_config.pinnedSlots.begin(), m_config.pinnedSlots.end(),
-                        [&](const PinnedSlotConfig& p) { return p.id == targetSlot.id; }),
-                    m_config.pinnedSlots.end());
-            }
-            else if (!targetSlot.pathOrUrl.empty())
-            {
-                PinnedSlotConfig p;
-                p.id = L"pin-" + std::to_wstring(GetTickCount64());
-                p.kind = SlotKind::App;
-                p.label = targetSlot.label;
-                p.pathOrUrl = targetSlot.pathOrUrl;
-                m_config.pinnedSlots.push_back(std::move(p));
-            }
-            if (m_callbacks.saveAndReloadConfig) m_callbacks.saveAndReloadConfig(m_config);
-            Dismiss();
-            break;
-        case CmdNewCollection:
-        {
-            PinnedSlotConfig col;
-            col.id = L"col-" + std::to_wstring(GetTickCount64());
-            col.kind = SlotKind::Collection;
-            col.label = L"Collection " + std::to_wstring(m_config.pinnedSlots.size() + 1);
-            m_config.pinnedSlots.push_back(std::move(col));
-            if (m_callbacks.saveAndReloadConfig) m_callbacks.saveAndReloadConfig(m_config);
-            Dismiss();
-            break;
-        }
-        case CmdSettings:
-            Dismiss();
-            if (m_callbacks.launchTools) m_callbacks.launchTools(L"--settings");
-            break;
-        case CmdExit:
-            Dismiss();
-            if (m_callbacks.onExitRequested) m_callbacks.onExitRequested();
             break;
         }
     }
@@ -2662,6 +3234,7 @@ namespace winrings
         m_pressSlotIndex = -1;
         m_pressSubIndex = -1;
         m_reorderActive = false;
+        m_reorderWasUnpinned = false;
         m_reorderFromIndex = -1;
         m_reorderCurrentIndex = -1;
         if (m_isOpen)
@@ -2747,33 +3320,50 @@ namespace winrings
         {
             if (!files.empty())
             {
-                const std::wstring& first = files[0];
-                const DWORD attrs = GetFileAttributesW(first.c_str());
-                SlotKind kind = SlotKind::File;
-                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
-                    kind = SlotKind::Folder;
-                else if (first.size() >= 4 && _wcsicmp(first.c_str() + first.size() - 4, L".exe") == 0)
-                    kind = SlotKind::App;
-
-                const size_t slash = first.find_last_of(L"\\/");
-                std::wstring label = (slash != std::wstring::npos) ? first.substr(slash + 1) : first;
-                if (kind == SlotKind::App && IsExplorerExecutablePath(first))
+                auto& activePins = ActiveProfilePins();
+                const ULONGLONG baseTick = GetTickCount64();
+                for (size_t fi = 0; fi < files.size(); ++fi)
                 {
-                    label = L"File Explorer";
-                }
-                else if (kind != SlotKind::Folder)
-                {
-                    const size_t dot = label.find_last_of(L'.');
-                    if (dot != std::wstring::npos && dot > 0)
-                        label.resize(dot);
-                }
+                    const std::wstring& filePath = files[fi];
+                    if (filePath.empty())
+                        continue;
+                    const DWORD attrs = GetFileAttributesW(filePath.c_str());
+                    SlotKind kind = SlotKind::File;
+                    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    {
+                        kind = SlotKind::Folder;
+                    }
+                    else
+                    {
+                        const size_t dot = filePath.find_last_of(L'.');
+                        const std::wstring ext = (dot != std::wstring::npos) ? filePath.substr(dot) : L"";
+                        if (_wcsicmp(ext.c_str(), L".exe") == 0 || _wcsicmp(ext.c_str(), L".lnk") == 0)
+                            kind = SlotKind::App;
+                        else if (_wcsicmp(ext.c_str(), L".bat") == 0 || _wcsicmp(ext.c_str(), L".cmd") == 0 || _wcsicmp(ext.c_str(), L".ps1") == 0)
+                            kind = SlotKind::Script;
+                    }
 
-                PinnedSlotConfig pin;
-                pin.id = L"pin-" + std::to_wstring(GetTickCount64());
-                pin.kind = kind;
-                pin.label = label;
-                pin.pathOrUrl = first;
-                m_config.pinnedSlots.push_back(std::move(pin));
+                    const size_t slash = filePath.find_last_of(L"\\/");
+                    std::wstring label = (slash != std::wstring::npos) ? filePath.substr(slash + 1) : filePath;
+                    if (kind == SlotKind::App && IsExplorerExecutablePath(filePath))
+                    {
+                        label = L"File Explorer";
+                    }
+                    else if (kind != SlotKind::Folder)
+                    {
+                        const size_t dot = label.find_last_of(L'.');
+                        if (dot != std::wstring::npos && dot > 0)
+                            label.resize(dot);
+                    }
+
+                    PinnedSlotConfig pin;
+                    pin.id = L"pin-" + std::to_wstring(baseTick + fi);
+                    pin.kind = kind;
+                    pin.label = label;
+                    pin.pathOrUrl = filePath;
+                    activePins.push_back(std::move(pin));
+                }
+                m_config.PullFromDefaultProfileMirror();
                 if (m_callbacks.saveAndReloadConfig)
                     m_callbacks.saveAndReloadConfig(m_config);
             }
@@ -2785,32 +3375,35 @@ namespace winrings
                 pin.kind = SlotKind::Website;
                 pin.label = text;
                 pin.pathOrUrl = text;
-                m_config.pinnedSlots.push_back(pin);
+                ActiveProfilePins().push_back(pin);
+                m_config.PullFromDefaultProfileMirror();
                 if (m_callbacks.saveAndReloadConfig)
                     m_callbacks.saveAndReloadConfig(m_config);
 
                 const HWND overlayHwnd = m_hwnd;
-                const std::wstring cfgPath = SwitcherConfig::ConfigPath();
-                SlotModel::FetchFaviconAsync(text, [overlayHwnd, cfgPath, pinId](std::wstring relPath) {
+                const std::wstring activeProfId = m_activeProfileId;
+                const std::wstring profPath = SwitcherConfig::ProfileFilePath(activeProfId);
+                SlotModel::FetchFaviconAsync(text, [overlayHwnd, profPath, pinId, activeProfId](std::wstring relPath) {
                     if (relPath.empty())
                         return;
-                    SwitcherConfig diskCfg;
-                    if (!SwitcherConfig::LoadFromFile(cfgPath, diskCfg))
-                        diskCfg = SwitcherConfig::CreateDefault();
-                    for (auto& s : diskCfg.pinnedSlots)
+                    RingProfileConfig prof;
+                    if (!RingProfileConfig::LoadFromFile(profPath, prof, activeProfId))
+                        return;
+                    bool updated = false;
+                    for (auto& s : prof.pinnedSlots)
                     {
                         if (s.id == pinId)
                         {
                             s.iconCacheFile = relPath;
+                            updated = true;
                             break;
                         }
                     }
-                    diskCfg.SaveToFile(cfgPath);
-                    if (overlayHwnd && IsWindow(overlayHwnd))
+                    if (updated && prof.SaveToFile(profPath) && overlayHwnd && IsWindow(overlayHwnd))
                         PostMessageW(overlayHwnd, WM_APP + 50, 0, 0);
                 });
             }
-            Dismiss();
+            Render();
             return;
         }
 
@@ -2838,7 +3431,7 @@ namespace winrings
                             args.push_back(L' ');
                         args += L"\"" + f + L"\"";
                     }
-                    SlotModel::LaunchPathOrUrl(target.pathOrUrl, args);
+                    SlotModel::LaunchPathOrUrl(target.pathOrUrl, args, target.runAsAdmin);
                 }
                 return;
             }
@@ -2899,31 +3492,38 @@ namespace winrings
 
             if (m_pressKind == PressKind::SubmenuCard)
             {
+                const bool inFolderSubmenu =
+                    m_expandedSlotIndex >= 0 &&
+                    m_expandedSlotIndex < static_cast<int>(m_visibleSlots.size()) &&
+                    m_visibleSlots[static_cast<size_t>(m_expandedSlotIndex)].kind == SlotKind::Folder;
+                if (!inFolderSubmenu)
+                    return 0;
+
                 const double movedPx = std::hypot(
                     static_cast<double>(screenPt.x - m_pressScreenPt.x),
                     static_cast<double>(screenPt.y - m_pressScreenPt.y));
                 if (movedPx >= 5.0 * m_dpiScale)
                 {
                     std::wstring dragPath;
-                    if (m_expandedSlotIndex >= 0 && m_pressSubIndex >= 0 &&
-                        m_pressSubIndex < static_cast<int>(m_submenuCards.size()))
+                    if (m_pressSubIndex >= 0 && m_pressSubIndex < static_cast<int>(m_submenuCards.size()))
                     {
                         const auto& card = m_submenuCards[static_cast<size_t>(m_pressSubIndex)];
                         if (card.subSlot &&
                             (card.subSlot->kind == SlotKind::File || card.subSlot->kind == SlotKind::Folder) &&
-                            !card.subSlot->pathOrUrl.empty())
+                            !card.subSlot->pathOrUrl.empty() &&
+                            GetFileAttributesW(card.subSlot->pathOrUrl.c_str()) != INVALID_FILE_ATTRIBUTES)
                         {
                             dragPath = card.subSlot->pathOrUrl;
                         }
                     }
 
-                    m_pressKind = PressKind::None;
-                    m_pressSubIndex = -1;
-                    if (GetCapture() == m_hwnd)
-                        ReleaseCapture();
-
                     if (!dragPath.empty())
                     {
+                        m_pressKind = PressKind::None;
+                        m_pressSubIndex = -1;
+                        if (GetCapture() == m_hwnd)
+                            ReleaseCapture();
+
                         ClearSubmenu();
                         m_selectedIndex = -1;
                         Render();
@@ -2940,33 +3540,45 @@ namespace winrings
             if (m_pressKind == PressKind::RingSlot)
             {
                 const int pinnedCount = PinnedVisibleSlotCount();
+                const int totalSlots = static_cast<int>(m_visibleSlots.size());
                 if (!m_reorderActive)
                 {
                     const double movedPx = std::hypot(
                         static_cast<double>(screenPt.x - m_pressScreenPt.x),
                         static_cast<double>(screenPt.y - m_pressScreenPt.y));
                     if (movedPx >= 6.0 * m_dpiScale &&
-                        m_pressSlotIndex >= 0 && m_pressSlotIndex < pinnedCount &&
-                        pinnedCount > 1 && m_filterQuery.empty() && !m_searchArcActive)
+                        m_pressSlotIndex >= 0 && m_pressSlotIndex < totalSlots &&
+                        totalSlots > 1 && m_filterQuery.empty() && !m_searchArcActive)
                     {
-                        m_reorderActive = true;
-                        m_reorderFromIndex = m_pressSlotIndex;
-                        m_reorderCurrentIndex = m_pressSlotIndex;
-                        m_reorderCursorDip = localDip;
-                        ClearSubmenu();
-                        Render();
+                        const bool isUnpinned = !m_visibleSlots[static_cast<size_t>(m_pressSlotIndex)].isPinned;
+                        if (isUnpinned || pinnedCount > 1)
+                        {
+                            m_reorderActive = true;
+                            m_reorderWasUnpinned = isUnpinned;
+                            m_reorderFromIndex = m_pressSlotIndex;
+                            m_reorderCurrentIndex = m_pressSlotIndex;
+                            m_reorderCursorDip = localDip;
+                            ClearSubmenu();
+                            Render();
+                        }
                     }
                 }
                 if (m_reorderActive)
                 {
                     m_reorderCursorDip = localDip;
-                    const int targetIdx = ComputeReorderTargetSlotIndex(
-                        localDip.x - kCenterDip,
-                        localDip.y - kCenterDip,
-                        pinnedCount,
-                        static_cast<int>(m_visibleSlots.size()));
+                    const int targetIdx = m_reorderWasUnpinned
+                        ? ComputeUnpinnedDragTargetIndex(
+                            localDip.x - kCenterDip,
+                            localDip.y - kCenterDip,
+                            pinnedCount,
+                            totalSlots)
+                        : ComputeReorderTargetSlotIndex(
+                            localDip.x - kCenterDip,
+                            localDip.y - kCenterDip,
+                            pinnedCount,
+                            totalSlots);
                     if (targetIdx != m_reorderCurrentIndex &&
-                        targetIdx >= 0 && targetIdx < static_cast<int>(m_visibleSlots.size()))
+                        targetIdx >= 0 && targetIdx < totalSlots)
                     {
                         ReorderVectorElement(m_visibleSlots, static_cast<size_t>(m_reorderCurrentIndex), static_cast<size_t>(targetIdx));
                         ReorderVectorElement(m_allSlots, static_cast<size_t>(m_reorderCurrentIndex), static_cast<size_t>(targetIdx));
@@ -2992,7 +3604,7 @@ namespace winrings
 
         case WM_LBUTTONDOWN:
         {
-            if (!m_isLockedOpen || m_dragActive)
+            if (!m_isLockedOpen || m_dragActive || m_contextMenuOpen)
                 return 0;
             POINT clientPt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             POINT screenPt = clientPt;
@@ -3054,7 +3666,9 @@ namespace winrings
             {
                 const int fromIdx = m_reorderFromIndex;
                 const int toIdx = m_reorderCurrentIndex;
+                const bool wasUnpinned = m_reorderWasUnpinned;
                 m_reorderActive = false;
+                m_reorderWasUnpinned = false;
                 m_reorderFromIndex = -1;
                 m_reorderCurrentIndex = -1;
                 m_pressKind = PressKind::None;
@@ -3062,13 +3676,47 @@ namespace winrings
                 if (GetCapture() == m_hwnd)
                     ReleaseCapture();
 
-                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx &&
-                    static_cast<size_t>(fromIdx) < m_config.pinnedSlots.size() &&
-                    static_cast<size_t>(toIdx) < m_config.pinnedSlots.size())
+                auto& activePins = ActiveProfilePins();
+                std::vector<bool> hiddenFlags;
+                hiddenFlags.reserve(activePins.size());
+                for (const auto& p : activePins)
+                    hiddenFlags.push_back(p.hiddenFromRing);
+
+                if (wasUnpinned)
                 {
-                    ReorderVectorElement(m_config.pinnedSlots, static_cast<size_t>(fromIdx), static_cast<size_t>(toIdx));
-                    if (m_callbacks.saveAndReloadConfig)
-                        m_callbacks.saveAndReloadConfig(m_config);
+                    if (toIdx >= 0 && toIdx < static_cast<int>(m_visibleSlots.size()))
+                    {
+                        const RingSlot& moved = m_visibleSlots[static_cast<size_t>(toIdx)];
+                        if (!moved.pathOrUrl.empty())
+                        {
+                            PinnedSlotConfig newPin;
+                            newPin.id = L"pin-" + std::to_wstring(GetTickCount64());
+                            newPin.kind = moved.kind;
+                            newPin.label = moved.label;
+                            newPin.pathOrUrl = moved.pathOrUrl;
+                            newPin.runAsAdmin = moved.runAsAdmin;
+                            const size_t insertPos = MapVisiblePinnedInsertPosToConfigIndex(
+                                hiddenFlags, static_cast<size_t>(toIdx));
+                            activePins.insert(
+                                activePins.begin() + static_cast<ptrdiff_t>((std::min)(insertPos, activePins.size())),
+                                std::move(newPin));
+                            m_config.PullFromDefaultProfileMirror();
+                            if (m_callbacks.saveAndReloadConfig)
+                                m_callbacks.saveAndReloadConfig(m_config);
+                        }
+                    }
+                }
+                else if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx)
+                {
+                    const size_t cfgFrom = MapVisiblePinnedIndexToConfigIndex(hiddenFlags, static_cast<size_t>(fromIdx));
+                    const size_t cfgTo = MapVisiblePinnedIndexToConfigIndex(hiddenFlags, static_cast<size_t>(toIdx));
+                    if (cfgFrom < activePins.size() && cfgTo < activePins.size() && cfgFrom != cfgTo)
+                    {
+                        ReorderVectorElement(activePins, cfgFrom, cfgTo);
+                        m_config.PullFromDefaultProfileMirror();
+                        if (m_callbacks.saveAndReloadConfig)
+                            m_callbacks.saveAndReloadConfig(m_config);
+                    }
                 }
                 Render();
                 return 0;
@@ -3121,6 +3769,13 @@ namespace winrings
         {
             POINT screenPt{};
             GetCursorPos(&screenPt);
+            if (m_contextMenuOpen)
+            {
+                m_pendingContextMenu = true;
+                m_pendingContextMenuPt = screenPt;
+                DismissActiveContextFlyout();
+                return 0;
+            }
             ShowContextMenuAt(screenPt);
             return 0;
         }

@@ -48,11 +48,16 @@ namespace winrings
 
         void SetConfig(const SwitcherConfig& config);
         const SwitcherConfig& Config() const noexcept { return m_config; }
+        void SetActiveProfileId(const std::wstring& profileId) { m_activeProfileId = profileId.empty() ? L"default" : profileId; }
+        const std::wstring& ActiveProfileId() const noexcept { return m_activeProfileId; }
 
         HWND Hwnd() const noexcept { return m_hwnd; }
         bool IsOpen() const noexcept { return m_isOpen; }
         bool IsLockedOpen() const noexcept { return m_isLockedOpen; }
-        bool IsDragOrReorderActive() const noexcept { return m_dragActive || m_draggingOutFromRing || m_reorderActive; }
+        bool IsDragOrReorderActive() const noexcept { return m_dragActive || m_draggingOutFromRing || m_reorderActive || m_contextMenuOpen || m_modalDialogOpen; }
+        bool IsOpenedForTrayPreview() const noexcept { return m_openedForTrayPreview; }
+        void SetOpenedForTrayPreview(bool trayPreview) noexcept { m_openedForTrayPreview = trayPreview; }
+        void RefreshSlots(std::vector<RingSlot> slots);
         double DpiScale() const noexcept { return m_dpiScale; }
         bool IsPointInActiveBounds(POINT screenPt) const noexcept;
 
@@ -90,7 +95,16 @@ namespace winrings
             bool isRingSlot = true;
             int index = -1;
             int tier = 99;
+            int sourcePriority = 0; // 0 = visible Ring slot, 1 = custom Search-Only, 2 = system AppIndex
             size_t nameLen = 0;
+        };
+
+        enum class ActiveBackdropBackend
+        {
+            None,
+            WcaDualHwnd,
+            TaskbarComposition,
+            MatteDComp
         };
 
         using ThemeColors = RingMaterialSpec;
@@ -105,6 +119,9 @@ namespace winrings
         void UpdateWcaRegion(float dpiScale, float openScale, float outerR, float holeR,
             bool hasCurvedArc, bool hasQuery, const D2D1_ROUNDED_RECT& searchPill,
             bool hasSummary, const D2D1_ROUNDED_RECT& centerPill);
+        bool EnsureDCompPipeline();
+        void ReleaseDCompPipeline();
+        bool SyncBackdropBackend(SurfaceTexture desired, const SwitcherConfig& effectiveCfg);
 
         bool CreateGraphicsDevices();
         void ReleaseGraphicsDevices();
@@ -132,6 +149,7 @@ namespace winrings
         std::wstring BuildFilterSummary() const;
 
         int PinnedVisibleSlotCount() const noexcept;
+        std::vector<PinnedSlotConfig>& ActiveProfilePins() noexcept;
         void ResetDragSpringState() noexcept;
         void CancelPendingPressAndReorder(bool revertVisualOrder);
         void EnsureAnimTimerRunning();
@@ -149,6 +167,7 @@ namespace winrings
         AppIndex* m_appIndex = nullptr;
         Callbacks m_callbacks;
         SwitcherConfig m_config;
+        std::wstring m_activeProfileId = L"default";
 
         HWND m_hwnd = nullptr;
         HWND m_wcaBackdropHwnd = nullptr;
@@ -182,6 +201,7 @@ namespace winrings
         Microsoft::WRL::ComPtr<IDXGISwapChain1> m_maskSwapChain;
         Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_maskTargetBitmap;
         AcrylicBackdrop m_acrylicBackdrop;
+        ActiveBackdropBackend m_activeBackend = ActiveBackdropBackend::None;
         Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_noiseBitmap;
         Microsoft::WRL::ComPtr<ID2D1BitmapBrush> m_noiseBrush;
         int m_swapWidthPx = 0;
@@ -219,7 +239,11 @@ namespace winrings
 
         bool m_isOpen = false;
         bool m_isLockedOpen = false;
+        bool m_openedForTrayPreview = false;
         bool m_contextMenuOpen = false;
+        bool m_pendingContextMenu = false;
+        POINT m_pendingContextMenuPt{};
+        bool m_modalDialogOpen = false;
         bool m_dragActive = false;
         bool m_dragOverCenter = false;
         bool m_draggingOutFromRing = false;
@@ -228,6 +252,7 @@ namespace winrings
         int m_pressSubIndex = -1;
         POINT m_pressScreenPt{};
         bool m_reorderActive = false;
+        bool m_reorderWasUnpinned = false;
         int m_reorderFromIndex = -1;
         int m_reorderCurrentIndex = -1;
         PointD m_reorderCursorDip{};

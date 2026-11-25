@@ -10,6 +10,8 @@
 #include <sstream>
 #include <variant>
 
+#include "SearchMatch.h"
+
 namespace winrings
 {
     std::wstring Utf8ToWide(const std::string& utf8)
@@ -36,19 +38,6 @@ namespace winrings
         return utf8;
     }
 
-    const wchar_t* ToString(MouseTriggerButton v) noexcept
-    {
-        switch (v)
-        {
-        case MouseTriggerButton::SideBack: return L"SideBack";
-        case MouseTriggerButton::SideForward: return L"SideForward";
-        case MouseTriggerButton::Middle: return L"Middle";
-        case MouseTriggerButton::RightLeftChord: return L"RightLeftChord";
-        case MouseTriggerButton::Disabled: return L"Disabled";
-        }
-        return L"SideBack";
-    }
-
     const wchar_t* ToString(ScrollWheelBehavior v) noexcept
     {
         switch (v)
@@ -68,6 +57,17 @@ namespace winrings
         case WindowViewMode::TitleColumn: return L"TitleColumn";
         }
         return L"OuterArc";
+    }
+
+    const wchar_t* ToString(SurfaceTexture v) noexcept
+    {
+        switch (v)
+        {
+        case SurfaceTexture::A4SAcrylic: return L"A4SAcrylic";
+        case SurfaceTexture::TaskbarGlass: return L"TaskbarGlass";
+        case SurfaceTexture::PureMatte: return L"PureMatte";
+        }
+        return L"A4SAcrylic";
     }
 
     const wchar_t* ToString(RingTheme v) noexcept
@@ -502,8 +502,11 @@ namespace winrings
             TryGetWString(obj, "label", slot.label);
             TryGetWString(obj, "pathOrUrl", slot.pathOrUrl);
             TryGetWString(obj, "iconCacheFile", slot.iconCacheFile);
+            TryGetBool(obj, "runAsAdmin", slot.runAsAdmin);
+            TryGetWString(obj, "arguments", slot.arguments);
+            TryGetBool(obj, "hiddenFromRing", slot.hiddenFromRing);
             TryGetInt(obj, "maxFolderItems", slot.maxFolderItems);
-            slot.maxFolderItems = std::clamp(slot.maxFolderItems, 1, 9);
+            slot.maxFolderItems = std::clamp(slot.maxFolderItems, 1, 12);
 
             const auto itemsIt = obj.find("items");
             if (itemsIt != obj.end() && itemsIt->second.IsArray())
@@ -527,6 +530,14 @@ namespace winrings
             out += ind2 + "\"label\": "; AppendEscapedJsonString(out, WideToUtf8(slot.label)); out += ",\n";
             out += ind2 + "\"pathOrUrl\": "; AppendEscapedJsonString(out, WideToUtf8(slot.pathOrUrl)); out += ",\n";
             out += ind2 + "\"iconCacheFile\": "; AppendEscapedJsonString(out, WideToUtf8(slot.iconCacheFile)); out += ",\n";
+            if (slot.runAsAdmin)
+                out += ind2 + "\"runAsAdmin\": true,\n";
+            if (!slot.arguments.empty())
+            {
+                out += ind2 + "\"arguments\": "; AppendEscapedJsonString(out, WideToUtf8(slot.arguments)); out += ",\n";
+            }
+            if (slot.hiddenFromRing)
+                out += ind2 + "\"hiddenFromRing\": true,\n";
             out += ind2 + "\"maxFolderItems\": " + std::to_string(slot.maxFolderItems) + ",\n";
             out += ind2 + "\"items\": [";
             if (!slot.items.empty())
@@ -544,7 +555,268 @@ namespace winrings
             out += "]\n";
             out += ind + "}";
         }
+
+        RingProfileConfig ParseProfile(const JsonObject& obj, const std::wstring& fallbackId = L"profile")
+        {
+            RingProfileConfig p;
+            TryGetWString(obj, "id", p.id);
+            TryGetWString(obj, "name", p.name);
+            if (p.id.empty())
+                p.id = p.name.empty() ? (fallbackId.empty() ? L"profile" : fallbackId) : p.name;
+            if (p.name.empty())
+                p.name = p.id;
+            TryGetBool(obj, "includeRunningApps", p.includeRunningApps);
+            const auto pinsIt = obj.find("pinnedSlots");
+            if (pinsIt != obj.end() && pinsIt->second.IsArray())
+            {
+                for (const auto& val : *pinsIt->second.AsArray())
+                {
+                    if (const auto* slotObj = val.AsObject())
+                        p.pinnedSlots.push_back(ParseSlot(*slotObj));
+                }
+            }
+            return p;
+        }
+
+        void SerializeProfile(std::string& out, const RingProfileConfig& prof, int indentLevel, bool includeVersion = false)
+        {
+            const std::string ind(static_cast<size_t>(indentLevel * 2), ' ');
+            const std::string ind2(static_cast<size_t>((indentLevel + 1) * 2), ' ');
+            out += ind + "{\n";
+            if (includeVersion)
+                out += ind2 + "\"version\": 1,\n";
+            out += ind2 + "\"id\": "; AppendEscapedJsonString(out, WideToUtf8(prof.id)); out += ",\n";
+            out += ind2 + "\"name\": "; AppendEscapedJsonString(out, WideToUtf8(prof.name)); out += ",\n";
+            out += ind2 + "\"includeRunningApps\": "; out += (prof.includeRunningApps ? "true" : "false"); out += ",\n";
+            out += ind2 + "\"pinnedSlots\": [";
+            if (!prof.pinnedSlots.empty())
+            {
+                out += "\n";
+                for (size_t i = 0; i < prof.pinnedSlots.size(); ++i)
+                {
+                    SerializeSlot(out, prof.pinnedSlots[i], indentLevel + 2);
+                    if (i + 1 < prof.pinnedSlots.size())
+                        out += ",";
+                    out += "\n";
+                }
+                out += ind2;
+            }
+            out += "]\n";
+            out += ind + "}";
+        }
+
+        bool ReadUtf8FileBounded(const std::wstring& path, std::string& outBytes)
+        {
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE)
+                return false;
+
+            LARGE_INTEGER size{};
+            if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 4 * 1024 * 1024)
+            {
+                CloseHandle(file);
+                return false;
+            }
+            std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+            DWORD read = 0;
+            const BOOL ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+            CloseHandle(file);
+            if (!ok || read != bytes.size())
+                return false;
+            outBytes = std::move(bytes);
+            return true;
+        }
+
+        bool WriteUtf8FileAtomic(const std::wstring& path, const std::string& json)
+        {
+            const size_t slash = path.find_last_of(L"\\/");
+            if (slash != std::wstring::npos)
+            {
+                const std::wstring dir = path.substr(0, slash);
+                SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+            }
+
+            const std::wstring tmpPath = path + L".tmp";
+            HANDLE file = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE)
+                return false;
+
+            DWORD written = 0;
+            const BOOL ok = WriteFile(file, json.data(), static_cast<DWORD>(json.size()), &written, nullptr)
+                && written == json.size();
+            FlushFileBuffers(file);
+            CloseHandle(file);
+            if (!ok)
+            {
+                DeleteFileW(tmpPath.c_str());
+                return false;
+            }
+
+            if (!MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                DeleteFileW(tmpPath.c_str());
+                return false;
+            }
+            return true;
+        }
+
+        std::wstring FileStemOfProfilePath(const std::wstring& fileName)
+        {
+            const size_t dot = fileName.find_last_of(L'.');
+            return (dot != std::wstring::npos) ? fileName.substr(0, dot) : fileName;
+        }
+
+        bool UpgradeBuiltInSMenuProfile(RingProfileConfig& prof)
+        {
+            if (_wcsicmp(prof.id.c_str(), L"SMenu") != 0)
+                return false;
+            bool changed = false;
+            for (auto& slot : prof.pinnedSlots)
+            {
+                if (slot.id == L"smenu-power")
+                {
+                    if (_wcsicmp(slot.pathOrUrl.c_str(), L"winrings://power/shutdown") == 0)
+                    {
+                        slot.pathOrUrl.clear();
+                        changed = true;
+                    }
+                    if (slot.items.size() == 3 &&
+                        slot.items[0].id == L"smenu-switch-user" &&
+                        slot.items[2].id == L"smenu-restart")
+                    {
+                        std::swap(slot.items[0], slot.items[2]);
+                        changed = true;
+                    }
+                    break;
+                }
+            }
+            return changed;
+        }
+        TriggerBinding ParseTrigger(const JsonObject& obj)
+        {
+            TriggerBinding b;
+            std::wstring s;
+            if (TryGetWString(obj, "kind", s))
+            {
+                b.kind = ParseEnum<TriggerKind>(s, TriggerKind::Disabled, {
+                    { L"Disabled", TriggerKind::Disabled },
+                    { L"MouseButton", TriggerKind::MouseButton },
+                    { L"RightLeftChord", TriggerKind::RightLeftChord },
+                    { L"KeyChord", TriggerKind::KeyChord },
+                    { L"SoloModifier", TriggerKind::SoloModifier }
+                });
+            }
+            if (TryGetWString(obj, "mouseButton", s))
+            {
+                b.mouseButton = ParseEnum<MouseTriggerButton>(s, MouseTriggerButton::Disabled, {
+                    { L"SideBack", MouseTriggerButton::SideBack },
+                    { L"SideForward", MouseTriggerButton::SideForward },
+                    { L"Middle", MouseTriggerButton::Middle },
+                    { L"RightLeftChord", MouseTriggerButton::RightLeftChord },
+                    { L"Disabled", MouseTriggerButton::Disabled }
+                });
+            }
+            TryGetUInt(obj, "modifiers", b.modifiers);
+            TryGetUInt(obj, "vk", b.vk);
+            b.vk = NormalizeTriggerVk(b.vk);
+            TryGetWString(obj, "profileId", b.profileId);
+            if (b.profileId.empty())
+                b.profileId = L"default";
+            return b;
+        }
+
+        void SerializeTrigger(std::string& out, const TriggerBinding& b, int indentLevel)
+        {
+            const std::string ind(static_cast<size_t>(indentLevel * 2), ' ');
+            const std::string ind2(static_cast<size_t>((indentLevel + 1) * 2), ' ');
+            out += ind + "{\n";
+            out += ind2 + "\"kind\": "; AppendEscapedJsonString(out, WideToUtf8(ToString(b.kind))); out += ",\n";
+            out += ind2 + "\"mouseButton\": "; AppendEscapedJsonString(out, WideToUtf8(ToString(b.mouseButton))); out += ",\n";
+            out += ind2 + "\"modifiers\": " + std::to_string(b.modifiers) + ",\n";
+            out += ind2 + "\"vk\": " + std::to_string(b.vk) + ",\n";
+            out += ind2 + "\"profileId\": "; AppendEscapedJsonString(out, WideToUtf8(b.profileId.empty() ? L"default" : b.profileId)); out += "\n";
+            out += ind + "}";
+        }
     } // namespace
+
+    void SwitcherConfig::SyncLegacyTriggerMirrors() noexcept
+    {
+        mouseTrigger = MouseTriggerButton::Disabled;
+        hotkeyEnabled = false;
+        hotkeyModifiers = MOD_ALT;
+        hotkeyVk = VK_SPACE;
+        menuKeyEnabled = false;
+        interceptWinTab = false;
+        interceptAltTab = false;
+
+        for (const auto& t : triggers)
+        {
+            if (t.kind == TriggerKind::RightLeftChord && mouseTrigger == MouseTriggerButton::Disabled)
+                mouseTrigger = MouseTriggerButton::RightLeftChord;
+            else if (t.kind == TriggerKind::MouseButton && mouseTrigger == MouseTriggerButton::Disabled)
+                mouseTrigger = t.mouseButton;
+            else if (t.kind == TriggerKind::KeyChord)
+            {
+                const UINT nvk = NormalizeTriggerVk(t.vk);
+                if (t.modifiers == 0 && nvk == VK_APPS)
+                    menuKeyEnabled = true;
+                else if (t.modifiers == MOD_WIN && nvk == VK_TAB)
+                    interceptWinTab = true;
+                else if (t.modifiers == MOD_ALT && nvk == VK_TAB)
+                    interceptAltTab = true;
+                else if (!hotkeyEnabled && nvk != 0)
+                {
+                    hotkeyEnabled = true;
+                    hotkeyModifiers = t.modifiers;
+                    hotkeyVk = nvk;
+                }
+            }
+        }
+    }
+
+    std::string RingProfileConfig::ToJsonUtf8() const
+    {
+        std::string out;
+        out.reserve(1024);
+        SerializeProfile(out, *this, 0, true);
+        out += "\n";
+        return out;
+    }
+
+    bool RingProfileConfig::ParseJsonUtf8(const std::string& jsonUtf8, RingProfileConfig& outProfile, const std::wstring& fallbackId)
+    {
+        JsonValue rootVal;
+        JsonParser parser(jsonUtf8);
+        if (!parser.ParseRoot(rootVal))
+            return false;
+        const auto* obj = rootVal.AsObject();
+        if (!obj)
+            return false;
+        outProfile = ParseProfile(*obj, fallbackId);
+        return true;
+    }
+
+    bool RingProfileConfig::LoadFromFile(const std::wstring& path, RingProfileConfig& outProfile, const std::wstring& fallbackId)
+    {
+        std::string bytes;
+        if (!ReadUtf8FileBounded(path, bytes))
+            return false;
+        std::wstring stem = fallbackId;
+        if (stem.empty())
+        {
+            const size_t slash = path.find_last_of(L"\\/");
+            const std::wstring fn = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+            stem = FileStemOfProfilePath(fn);
+        }
+        return ParseJsonUtf8(bytes, outProfile, stem);
+    }
+
+    bool RingProfileConfig::SaveToFile(const std::wstring& path) const
+    {
+        return WriteUtf8FileAtomic(path, ToJsonUtf8());
+    }
 
     std::wstring SwitcherConfig::AppDataDirectory()
     {
@@ -572,14 +844,242 @@ namespace winrings
         return AppDataDirectory() + L"\\config.json";
     }
 
+    namespace
+    {
+        std::wstring LegacySearchItemsPath(const std::wstring& configPath)
+        {
+            if (!configPath.empty())
+            {
+                const size_t slash = configPath.find_last_of(L"\\/");
+                if (slash != std::wstring::npos && slash > 0)
+                    return configPath.substr(0, slash) + L"\\search.json";
+            }
+            return SwitcherConfig::AppDataDirectory() + L"\\search.json";
+        }
+
+        bool LoadLegacySearchItemsFromFile(const std::wstring& path, std::vector<PinnedSlotConfig>& outItems)
+        {
+            std::string bytes;
+            if (!ReadUtf8FileBounded(path, bytes))
+                return false;
+            JsonValue rootVal;
+            JsonParser parser(bytes);
+            if (!parser.ParseRoot(rootVal))
+                return false;
+            const auto* obj = rootVal.AsObject();
+            if (!obj)
+                return false;
+
+            std::vector<PinnedSlotConfig> parsed;
+            auto it = obj->find("items");
+            if (it == obj->end())
+                it = obj->find("searchItems");
+            if (it != obj->end() && it->second.IsArray())
+            {
+                for (const auto& val : *it->second.AsArray())
+                {
+                    if (const auto* slotObj = val.AsObject())
+                    {
+                        PinnedSlotConfig s = ParseSlot(*slotObj);
+                        s.hiddenFromRing = true;
+                        parsed.push_back(std::move(s));
+                    }
+                }
+            }
+            outItems = std::move(parsed);
+            return true;
+        }
+    } // namespace
+
+    std::wstring SwitcherConfig::SanitizeProfileId(const std::wstring& rawName)
+    {
+        std::wstring out;
+        out.reserve(rawName.size());
+        for (wchar_t ch : rawName)
+        {
+            if (ch < 0x20 || ch == L'\\' || ch == L'/' || ch == L':' || ch == L'*' ||
+                ch == L'?' || ch == L'"' || ch == L'<' || ch == L'>' || ch == L'|')
+            {
+                continue;
+            }
+            out.push_back(ch);
+        }
+        while (!out.empty() && (out.front() == L' ' || out.front() == L'\t' || out.front() == L'.'))
+            out.erase(out.begin());
+        while (!out.empty() && (out.back() == L' ' || out.back() == L'\t' || out.back() == L'.'))
+            out.pop_back();
+        if (out.size() > 28)
+            out.resize(28);
+        while (!out.empty() && (out.back() == L' ' || out.back() == L'.'))
+            out.pop_back();
+        if (out.empty())
+            out = L"profile";
+        return out;
+    }
+
+    std::wstring SwitcherConfig::ProfilesDirectory()
+    {
+        return AppDataDirectory() + L"\\profiles";
+    }
+
+    std::wstring SwitcherConfig::ProfilesDirectoryForConfigPath(const std::wstring& configPath)
+    {
+        const size_t slash = configPath.find_last_of(L"\\/");
+        if (slash != std::wstring::npos && slash > 0)
+            return configPath.substr(0, slash) + L"\\profiles";
+        return ProfilesDirectory();
+    }
+
+    std::wstring SwitcherConfig::ProfileFilePath(const std::wstring& profileId, const std::wstring& configPath)
+    {
+        const std::wstring dir = configPath.empty()
+            ? ProfilesDirectory()
+            : ProfilesDirectoryForConfigPath(configPath);
+        const std::wstring safeId = SanitizeProfileId(profileId.empty() ? L"default" : profileId);
+        return dir + L"\\" + safeId + L".json";
+    }
+
+    RingProfileConfig SwitcherConfig::CreateBuiltInSMenuProfile()
+    {
+        RingProfileConfig smenu;
+        smenu.id = L"SMenu";
+        smenu.name = L"SMenu";
+        smenu.includeRunningApps = false;
+
+        PinnedSlotConfig winMenu;
+        winMenu.id = L"smenu-windows";
+        winMenu.kind = SlotKind::Collection;
+        winMenu.label = L"Windows";
+        winMenu.pathOrUrl = L"winrings://system/start-menu";
+        winMenu.iconCacheFile = L"builtin:windows";
+        winMenu.maxFolderItems = 11;
+        winMenu.items = {
+            PinnedSlotConfig{ L"smenu-apps", SlotKind::File, L"Installed Apps", L"ms-settings:appsfeatures", L"builtin:apps", 8, {} },
+            PinnedSlotConfig{ L"smenu-poweropts", SlotKind::File, L"Power Options", L"ms-settings:powersleep", L"builtin:power-opts", 8, {} },
+            PinnedSlotConfig{ L"smenu-eventvwr", SlotKind::File, L"Event Viewer", L"%SystemRoot%\\System32\\eventvwr.msc", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-system", SlotKind::File, L"System", L"ms-settings:about", L"builtin:system", 8, {} },
+            PinnedSlotConfig{ L"smenu-devmgmt", SlotKind::File, L"Device Manager", L"%SystemRoot%\\System32\\devmgmt.msc", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-ncpa", SlotKind::File, L"Network Connections", L"%SystemRoot%\\System32\\ncpa.cpl", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-diskmgmt", SlotKind::File, L"Disk Management", L"%SystemRoot%\\System32\\diskmgmt.msc", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-compmgmt", SlotKind::File, L"Computer Management", L"%SystemRoot%\\System32\\compmgmt.msc", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-taskmgr", SlotKind::App, L"Task Manager", L"%SystemRoot%\\System32\\taskmgr.exe", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-explorer", SlotKind::App, L"File Explorer", L"%SystemRoot%\\explorer.exe", L"", 8, {} },
+            PinnedSlotConfig{ L"smenu-run", SlotKind::File, L"Run", L"winrings://system/run-dialog", L"builtin:run", 8, {} }
+        };
+
+        PinnedSlotConfig cmdAdmin{ L"smenu-cmd-admin", SlotKind::App, L"CMD (Admin)", L"%SystemRoot%\\System32\\cmd.exe", L"", 8, {}, true, L"" };
+        PinnedSlotConfig psAdmin{ L"smenu-ps-admin", SlotKind::App, L"PowerShell (Admin)", L"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", L"", 8, {}, true, L"" };
+
+        PinnedSlotConfig powerMenu;
+        powerMenu.id = L"smenu-power";
+        powerMenu.kind = SlotKind::Collection;
+        powerMenu.label = L"Power";
+        powerMenu.pathOrUrl = L"";
+        powerMenu.iconCacheFile = L"builtin:power";
+        powerMenu.maxFolderItems = 3;
+        // At 6 o'clock (+pi/2), increasing angle sweeps right-to-left: Restart (right), Shut Down (center), Switch User (left).
+        powerMenu.items = {
+            PinnedSlotConfig{ L"smenu-restart", SlotKind::File, L"Restart", L"winrings://power/restart", L"builtin:restart", 8, {} },
+            PinnedSlotConfig{ L"smenu-shutdown", SlotKind::File, L"Shut Down", L"winrings://power/shutdown", L"builtin:shutdown", 8, {} },
+            PinnedSlotConfig{ L"smenu-switch-user", SlotKind::File, L"Switch User", L"winrings://power/switch-user", L"builtin:switch-user", 8, {} }
+        };
+
+        PinnedSlotConfig settingsSlot{ L"smenu-settings", SlotKind::File, L"Settings", L"ms-settings:", L"builtin:settings", 8, {} };
+        PinnedSlotConfig controlSlot{ L"smenu-control", SlotKind::App, L"Control Panel", L"%SystemRoot%\\System32\\control.exe", L"", 8, {} };
+
+        // Clockwise from 12 o'clock: Top=Windows, Right=CMD+PowerShell(Admin), Bottom=Power, Left=Settings+Control Panel
+        smenu.pinnedSlots = {
+            std::move(winMenu),
+            std::move(cmdAdmin),
+            std::move(psAdmin),
+            std::move(powerMenu),
+            std::move(settingsSlot),
+            std::move(controlSlot)
+        };
+        return smenu;
+    }
+
+    RingProfileConfig* SwitcherConfig::FindProfile(const std::wstring& profileId) noexcept
+    {
+        const wchar_t* target = profileId.empty() ? L"default" : profileId.c_str();
+        for (auto& p : profiles)
+        {
+            if (_wcsicmp(p.id.c_str(), target) == 0)
+                return &p;
+        }
+        return nullptr;
+    }
+
+    const RingProfileConfig* SwitcherConfig::FindProfile(const std::wstring& profileId) const noexcept
+    {
+        const wchar_t* target = profileId.empty() ? L"default" : profileId.c_str();
+        for (const auto& p : profiles)
+        {
+            if (_wcsicmp(p.id.c_str(), target) == 0)
+                return &p;
+        }
+        return nullptr;
+    }
+
+    const RingProfileConfig& SwitcherConfig::ResolveProfile(const std::wstring& profileId) const noexcept
+    {
+        if (const RingProfileConfig* p = FindProfile(profileId))
+            return *p;
+        if (const RingProfileConfig* def = FindProfile(L"default"))
+            return *def;
+        if (!profiles.empty())
+            return profiles.front();
+        static const RingProfileConfig kEmptyFallback{};
+        return kEmptyFallback;
+    }
+
+    void SwitcherConfig::SyncDefaultProfileMirror()
+    {
+        if (RingProfileConfig* def = FindProfile(L"default"))
+        {
+            def->pinnedSlots = pinnedSlots;
+            def->includeRunningApps = includeUnpinnedRunningApps;
+        }
+        else
+        {
+            RingProfileConfig newDef;
+            newDef.id = L"default";
+            newDef.name = L"default";
+            newDef.includeRunningApps = includeUnpinnedRunningApps;
+            newDef.pinnedSlots = pinnedSlots;
+            profiles.insert(profiles.begin(), std::move(newDef));
+        }
+    }
+
+    void SwitcherConfig::PullFromDefaultProfileMirror()
+    {
+        if (const RingProfileConfig* def = FindProfile(L"default"))
+        {
+            pinnedSlots = def->pinnedSlots;
+            includeUnpinnedRunningApps = def->includeRunningApps;
+        }
+    }
+
     SwitcherConfig SwitcherConfig::CreateDefault()
     {
         SwitcherConfig cfg;
+        cfg.version = 6;
+        cfg.triggers = {
+            TriggerBinding{ TriggerKind::MouseButton, MouseTriggerButton::SideBack, 0, 0, L"default" },
+            TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_ALT, VK_SPACE, L"default" }
+        };
+        cfg.SyncLegacyTriggerMirrors();
         cfg.pinnedSlots = {
             PinnedSlotConfig{ L"pin-explorer", SlotKind::App, L"Explorer", L"C:\\Windows\\explorer.exe", L"", 8, {} },
             PinnedSlotConfig{ L"pin-downloads", SlotKind::Folder, L"Downloads", L"%USERPROFILE%\\Downloads", L"", 8, {} },
             PinnedSlotConfig{ L"pin-trash", SlotKind::RecycleBin, L"Recycle Bin", L"", L"", 8, {} }
         };
+        RingProfileConfig defProf;
+        defProf.id = L"default";
+        defProf.name = L"default";
+        defProf.includeRunningApps = cfg.includeUnpinnedRunningApps;
+        defProf.pinnedSlots = cfg.pinnedSlots;
+        cfg.profiles = { std::move(defProf), CreateBuiltInSMenuProfile() };
         return cfg;
     }
 
@@ -615,6 +1115,8 @@ namespace winrings
                 { L"Disabled", ScrollWheelBehavior::Disabled }
             });
         }
+        TryGetBool(*obj, "gestureTapOpenClose", cfg.gestureTapOpenClose);
+        TryGetBool(*obj, "gestureHoldReleaseSwitch", cfg.gestureHoldReleaseSwitch);
         TryGetBool(*obj, "doubleTapLastApp", cfg.doubleTapLastApp);
         TryGetInt(*obj, "tapThresholdMs", cfg.tapThresholdMs);
         TryGetInt(*obj, "doubleTapWindowMs", cfg.doubleTapWindowMs);
@@ -624,6 +1126,50 @@ namespace winrings
         TryGetBool(*obj, "menuKeyEnabled", cfg.menuKeyEnabled);
         TryGetBool(*obj, "interceptWinTab", cfg.interceptWinTab);
         TryGetBool(*obj, "interceptAltTab", cfg.interceptAltTab);
+
+        const auto triggersIt = obj->find("triggers");
+        if (triggersIt != obj->end() && triggersIt->second.IsArray())
+        {
+            cfg.triggers.clear();
+            for (const auto& val : *triggersIt->second.AsArray())
+            {
+                if (cfg.triggers.size() >= kMaxTriggerBindings)
+                    break;
+                if (const auto* trigObj = val.AsObject())
+                {
+                    TriggerBinding b = ParseTrigger(*trigObj);
+                    if (b.IsActive())
+                        cfg.triggers.push_back(std::move(b));
+                }
+            }
+            cfg.SyncLegacyTriggerMirrors();
+        }
+        else
+        {
+            cfg.triggers.clear();
+            auto pushUnique = [&](const TriggerBinding& candidate) {
+                if (!candidate.IsActive() || cfg.triggers.size() >= kMaxTriggerBindings)
+                    return;
+                for (const auto& existing : cfg.triggers)
+                {
+                    if (AreTriggerBindingsEqual(existing, candidate))
+                        return;
+                }
+                cfg.triggers.push_back(candidate);
+            };
+            if (cfg.mouseTrigger == MouseTriggerButton::RightLeftChord)
+                pushUnique(TriggerBinding{ TriggerKind::RightLeftChord, MouseTriggerButton::RightLeftChord, 0, 0, L"default" });
+            else if (cfg.mouseTrigger != MouseTriggerButton::Disabled)
+                pushUnique(TriggerBinding{ TriggerKind::MouseButton, cfg.mouseTrigger, 0, 0, L"default" });
+            if (cfg.hotkeyEnabled && cfg.hotkeyVk != 0)
+                pushUnique(TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, cfg.hotkeyModifiers, NormalizeTriggerVk(cfg.hotkeyVk), L"default" });
+            if (cfg.interceptAltTab)
+                pushUnique(TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_ALT, VK_TAB, L"default" });
+            if (cfg.interceptWinTab)
+                pushUnique(TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_WIN, VK_TAB, L"default" });
+            if (cfg.menuKeyEnabled)
+                pushUnique(TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, 0, VK_APPS, L"default" });
+        }
 
         TryGetDouble(*obj, "deadzoneDip", cfg.deadzoneDip);
         TryGetDouble(*obj, "ringRadiusDip", cfg.ringRadiusDip);
@@ -653,6 +1199,41 @@ namespace winrings
                 { L"Outline", RingTheme::A4S }
             });
         }
+
+        const bool hasSurfaceTex = TryGetWString(*obj, "surfaceTexture", s);
+        if (hasSurfaceTex)
+        {
+            cfg.surfaceTexture = ParseEnum<SurfaceTexture>(s, cfg.surfaceTexture, {
+                { L"A4SAcrylic", SurfaceTexture::A4SAcrylic },
+                { L"TaskbarGlass", SurfaceTexture::TaskbarGlass },
+                { L"PureMatte", SurfaceTexture::PureMatte }
+            });
+        }
+        else
+        {
+            // Honest v1-v3 migration from old RingTheme names
+            if (cfg.theme == RingTheme::DarkWood)
+            {
+                cfg.surfaceTexture = SurfaceTexture::PureMatte;
+                cfg.useCustomSurfaceColor = false;
+            }
+            else if (cfg.theme == RingTheme::Blue)
+            {
+                cfg.surfaceTexture = SurfaceTexture::TaskbarGlass;
+                cfg.useCustomSurfaceColor = true;
+                cfg.surfaceColor = L"#142A52";
+            }
+            else
+            {
+                cfg.surfaceTexture = SurfaceTexture::A4SAcrylic;
+                cfg.useCustomSurfaceColor = false;
+            }
+        }
+
+        TryGetBool(*obj, "useCustomSurfaceColor", cfg.useCustomSurfaceColor);
+        TryGetWString(*obj, "surfaceColor", cfg.surfaceColor);
+        TryGetBool(*obj, "autoLightDark", cfg.autoLightDark);
+        TryGetBool(*obj, "autoWindowsAccent", cfg.autoWindowsAccent);
         TryGetInt(*obj, "glassLevel", cfg.glassLevel);
         TryGetInt(*obj, "lightDarkMode", cfg.lightDarkMode);
         TryGetWString(*obj, "accentColor", cfg.accentColor);
@@ -672,6 +1253,33 @@ namespace winrings
             }
         }
 
+        const auto profsIt = obj->find("profiles");
+        if (profsIt != obj->end() && profsIt->second.IsArray())
+        {
+            cfg.profiles.clear();
+            for (const auto& val : *profsIt->second.AsArray())
+            {
+                if (const auto* profObj = val.AsObject())
+                {
+                    RingProfileConfig p = ParseProfile(*profObj);
+                    if (!cfg.FindProfile(p.id))
+                        cfg.profiles.push_back(std::move(p));
+                }
+            }
+            if (!cfg.FindProfile(L"default"))
+                cfg.SyncDefaultProfileMirror();
+            else
+                cfg.PullFromDefaultProfileMirror();
+            if (cfg.version < 5 && !cfg.FindProfile(L"SMenu"))
+                cfg.profiles.push_back(CreateBuiltInSMenuProfile());
+        }
+        else
+        {
+            cfg.profiles.clear();
+            cfg.SyncDefaultProfileMirror();
+            cfg.profiles.push_back(CreateBuiltInSMenuProfile());
+        }
+
         cfg.deadzoneDip = std::clamp(cfg.deadzoneDip, 8.0, 48.0);
         cfg.ringRadiusDip = std::clamp(cfg.ringRadiusDip, 72.0, 240.0);
         cfg.iconSizeDip = std::clamp(cfg.iconSizeDip, 24.0, 72.0);
@@ -684,7 +1292,7 @@ namespace winrings
         return true;
     }
 
-    std::string SwitcherConfig::ToJsonUtf8() const
+    std::string SwitcherConfig::ToJsonUtf8(bool includeInlineProfiles) const
     {
         std::string out;
         out.reserve(2048);
@@ -706,9 +1314,10 @@ namespace winrings
             std::snprintf(buf, sizeof(buf), "%.4g", v);
             out += "  \""; out += k; out += "\": "; out += buf; out += ",\n";
         };
-        auto addWStr = [&](const char* k, const std::wstring& v)
+        auto addWStr = [&](const char* k, const std::wstring& v, bool trailingComma = true)
         {
-            out += "  \""; out += k; out += "\": "; AppendEscapedJsonString(out, WideToUtf8(v)); out += ",\n";
+            out += "  \""; out += k; out += "\": "; AppendEscapedJsonString(out, WideToUtf8(v));
+            out += trailingComma ? ",\n" : "\n";
         };
 
         out += "{\n";
@@ -716,6 +1325,8 @@ namespace winrings
 
         addWStr("mouseTrigger", ToString(mouseTrigger));
         addWStr("scrollWheelMode", ToString(scrollWheelMode));
+        addBool("gestureTapOpenClose", gestureTapOpenClose);
+        addBool("gestureHoldReleaseSwitch", gestureHoldReleaseSwitch);
         addBool("doubleTapLastApp", doubleTapLastApp);
         addInt("tapThresholdMs", tapThresholdMs);
         addInt("doubleTapWindowMs", doubleTapWindowMs);
@@ -726,6 +1337,22 @@ namespace winrings
         addBool("interceptWinTab", interceptWinTab);
         addBool("interceptAltTab", interceptAltTab);
 
+        out += "  \"triggers\": [";
+        if (!triggers.empty())
+        {
+            out += "\n";
+            const size_t tLimit = (std::min)(triggers.size(), kMaxTriggerBindings);
+            for (size_t i = 0; i < tLimit; ++i)
+            {
+                SerializeTrigger(out, triggers[i], 2);
+                if (i + 1 < tLimit)
+                    out += ",";
+                out += "\n";
+            }
+            out += "  ";
+        }
+        out += "],\n";
+
         addDouble("deadzoneDip", deadzoneDip);
         addDouble("ringRadiusDip", ringRadiusDip);
         addDouble("iconSizeDip", iconSizeDip);
@@ -733,6 +1360,11 @@ namespace winrings
         addBool("disableOpeningAnimation", disableOpeningAnimation);
         addWStr("windowViewMode", ToString(windowViewMode));
         addBool("fanOutSingleWindow", fanOutSingleWindow);
+        addWStr("surfaceTexture", ToString(surfaceTexture));
+        addBool("useCustomSurfaceColor", useCustomSurfaceColor);
+        addWStr("surfaceColor", surfaceColor);
+        addBool("autoLightDark", autoLightDark);
+        addBool("autoWindowsAccent", autoWindowsAccent);
         addWStr("theme", ToString(theme));
         addInt("glassLevel", glassLevel);
         addInt("lightDarkMode", lightDarkMode);
@@ -740,82 +1372,204 @@ namespace winrings
         addBool("pointerFollow", pointerFollow);
         addBool("shiftCenterOnActiveMonitor", shiftCenterOnActiveMonitor);
         addBool("includeUnpinnedRunningApps", includeUnpinnedRunningApps);
-        addInt("maxSlots", maxSlots);
-
-        out += "  \"pinnedSlots\": [";
-        if (!pinnedSlots.empty())
+        if (includeInlineProfiles)
         {
-            out += "\n";
-            for (size_t i = 0; i < pinnedSlots.size(); ++i)
+            addInt("maxSlots", maxSlots);
+
+            out += "  \"pinnedSlots\": [";
+            if (!pinnedSlots.empty())
             {
-                SerializeSlot(out, pinnedSlots[i], 2);
-                if (i + 1 < pinnedSlots.size())
-                    out += ",";
                 out += "\n";
+                for (size_t i = 0; i < pinnedSlots.size(); ++i)
+                {
+                    SerializeSlot(out, pinnedSlots[i], 2);
+                    if (i + 1 < pinnedSlots.size())
+                        out += ",";
+                    out += "\n";
+                }
+                out += "  ";
             }
-            out += "  ";
+            out += "],\n";
+
+            out += "  \"profiles\": [";
+            if (!profiles.empty())
+            {
+                out += "\n";
+                for (size_t i = 0; i < profiles.size(); ++i)
+                {
+                    SerializeProfile(out, profiles[i], 2, false);
+                    if (i + 1 < profiles.size())
+                        out += ",";
+                    out += "\n";
+                }
+                out += "  ";
+            }
+            out += "]\n";
         }
-        out += "]\n";
+        else
+        {
+            out += "  \"maxSlots\": " + std::to_string(maxSlots) + "\n";
+        }
         out += "}\n";
         return out;
     }
 
     bool SwitcherConfig::LoadFromFile(const std::wstring& path, SwitcherConfig& outConfig)
     {
-        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE)
+        std::string bytes;
+        if (!ReadUtf8FileBounded(path, bytes))
             return false;
 
-        LARGE_INTEGER size{};
-        if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 4 * 1024 * 1024)
+        if (!ParseJsonUtf8(bytes, outConfig))
+            return false;
+
+        // Load standalone per-profile JSON files from <configDir>\profiles\*.json when present.
+        const std::wstring profDir = ProfilesDirectoryForConfigPath(path);
+        const std::wstring pattern = profDir + L"\\*.json";
+        WIN32_FIND_DATAW fd{};
+        HANDLE find = FindFirstFileW(pattern.c_str(), &fd);
+        if (find != INVALID_HANDLE_VALUE)
         {
-            CloseHandle(file);
-            return false;
-        }
-        std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
-        DWORD read = 0;
-        const BOOL ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
-        CloseHandle(file);
-        if (!ok || read != bytes.size())
-            return false;
+            std::vector<RingProfileConfig> fileProfiles;
+            auto findLoaded = [&](const std::wstring& id) -> RingProfileConfig* {
+                for (auto& existing : fileProfiles)
+                {
+                    if (_wcsicmp(existing.id.c_str(), id.c_str()) == 0)
+                        return &existing;
+                }
+                return nullptr;
+            };
 
-        return ParseJsonUtf8(bytes, outConfig);
+            do
+            {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    continue;
+                const std::wstring fileName = fd.cFileName;
+                const std::wstring fullPath = profDir + L"\\" + fileName;
+                const std::wstring stem = FileStemOfProfilePath(fileName);
+                RingProfileConfig prof;
+                if (RingProfileConfig::LoadFromFile(fullPath, prof, stem))
+                {
+                    if (prof.id.empty())
+                        prof.id = stem;
+                    if (prof.name.empty())
+                        prof.name = prof.id;
+
+                    if (RingProfileConfig* existing = findLoaded(prof.id))
+                    {
+                        if (_wcsicmp(SanitizeProfileId(prof.id).c_str(), stem.c_str()) == 0)
+                            *existing = std::move(prof);
+                    }
+                    else
+                    {
+                        fileProfiles.push_back(std::move(prof));
+                    }
+                }
+            } while (FindNextFileW(find, &fd));
+            FindClose(find);
+
+            if (!fileProfiles.empty())
+            {
+                std::sort(fileProfiles.begin(), fileProfiles.end(),
+                    [](const RingProfileConfig& a, const RingProfileConfig& b) {
+                        auto rank = [](const std::wstring& id) -> int {
+                            if (_wcsicmp(id.c_str(), L"default") == 0) return 0;
+                            if (_wcsicmp(id.c_str(), L"SMenu") == 0) return 1;
+                            return 2;
+                        };
+                        const int ra = rank(a.id);
+                        const int rb = rank(b.id);
+                        if (ra != rb)
+                            return ra < rb;
+                        return _wcsicmp(a.id.c_str(), b.id.c_str()) < 0;
+                    });
+
+                outConfig.profiles = std::move(fileProfiles);
+                if (!outConfig.FindProfile(L"default"))
+                    outConfig.SyncDefaultProfileMirror();
+                outConfig.PullFromDefaultProfileMirror();
+            }
+        }
+
+        if (RingProfileConfig* sMenuProf = outConfig.FindProfile(L"SMenu"))
+            UpgradeBuiltInSMenuProfile(*sMenuProf);
+
+        // One-time migration: fold legacy search.json entries into default profile as hidden pins.
+        std::vector<PinnedSlotConfig> legacySearch;
+        if (LoadLegacySearchItemsFromFile(LegacySearchItemsPath(path), legacySearch) && !legacySearch.empty())
+        {
+            if (RingProfileConfig* defProf = outConfig.FindProfile(L"default"))
+            {
+                for (auto& item : legacySearch)
+                {
+                    item.hiddenFromRing = true;
+                    const std::wstring newKey = CanonicalSearchKey(item.pathOrUrl);
+                    bool dup = false;
+                    if (!newKey.empty())
+                    {
+                        for (const auto& existing : defProf->pinnedSlots)
+                        {
+                            if (CanonicalSearchKey(existing.pathOrUrl) == newKey)
+                            {
+                                dup = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!dup)
+                        defProf->pinnedSlots.push_back(std::move(item));
+                }
+                outConfig.PullFromDefaultProfileMirror();
+            }
+        }
+
+        return true;
     }
 
     bool SwitcherConfig::SaveToFile(const std::wstring& path) const
     {
-        const size_t slash = path.find_last_of(L"\\/");
-        if (slash != std::wstring::npos)
+        if (!WriteUtf8FileAtomic(path, ToJsonUtf8(false)))
+            return false;
+
+        const std::wstring profDir = ProfilesDirectoryForConfigPath(path);
+        SHCreateDirectoryExW(nullptr, profDir.c_str(), nullptr);
+
+        if (profiles.empty())
         {
-            const std::wstring dir = path.substr(0, slash);
-            SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+            RingProfileConfig defProf;
+            defProf.id = L"default";
+            defProf.name = L"default";
+            defProf.includeRunningApps = includeUnpinnedRunningApps;
+            defProf.pinnedSlots = pinnedSlots;
+            if (!defProf.SaveToFile(ProfileFilePath(L"default", path)))
+                return false;
+            return true;
         }
 
-        const std::string json = ToJsonUtf8();
-        const std::wstring tmpPath = path + L".tmp";
-        HANDLE file = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE)
-            return false;
-
-        DWORD written = 0;
-        const BOOL ok = WriteFile(file, json.data(), static_cast<DWORD>(json.size()), &written, nullptr)
-            && written == json.size();
-        FlushFileBuffers(file);
-        CloseHandle(file);
-        if (!ok)
+        for (const auto& p : profiles)
         {
-            DeleteFileW(tmpPath.c_str());
-            return false;
-        }
-
-        if (!MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        {
-            DeleteFileW(tmpPath.c_str());
-            return false;
+            if (!p.SaveToFile(ProfileFilePath(p.id, path)))
+                return false;
         }
         return true;
+    }
+
+    bool SwitcherConfig::SaveProfile(const std::wstring& profileId, const std::wstring& configPath) const
+    {
+        const RingProfileConfig* prof = FindProfile(profileId);
+        if (!prof)
+            return false;
+        const std::wstring effectiveCfg = configPath.empty() ? ConfigPath() : configPath;
+        return prof->SaveToFile(ProfileFilePath(prof->id, effectiveCfg));
+    }
+
+    bool SwitcherConfig::DeleteProfileFile(const std::wstring& profileId, const std::wstring& configPath)
+    {
+        if (profileId.empty() || _wcsicmp(profileId.c_str(), L"default") == 0)
+            return false;
+        const std::wstring effectiveCfg = configPath.empty() ? ConfigPath() : configPath;
+        const std::wstring path = ProfileFilePath(profileId, effectiveCfg);
+        return DeleteFileW(path.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND;
     }
 
     SwitcherConfig SwitcherConfig::LoadOrCreate()
@@ -824,15 +1578,41 @@ namespace winrings
         const std::wstring path = ConfigPath();
         if (LoadFromFile(path, cfg))
         {
+            const bool missingDefaultProf =
+                GetFileAttributesW(ProfileFilePath(L"default", path).c_str()) == INVALID_FILE_ATTRIBUTES;
+            bool smenuNeedsUpgrade = false;
+            if (RingProfileConfig* sMenuDisk = cfg.FindProfile(L"SMenu"))
+            {
+                RingProfileConfig diskCopy;
+                if (RingProfileConfig::LoadFromFile(ProfileFilePath(L"SMenu", path), diskCopy))
+                    smenuNeedsUpgrade = UpgradeBuiltInSMenuProfile(diskCopy);
+            }
             if (cfg.version < 3)
             {
+                cfg.surfaceTexture = SurfaceTexture::A4SAcrylic;
+                cfg.useCustomSurfaceColor = false;
                 cfg.theme = RingTheme::A4S;
                 cfg.glassLevel = 50;
                 cfg.lightDarkMode = 0;
                 if (_wcsicmp(cfg.accentColor.c_str(), L"#3186FF") == 0)
                     cfg.accentColor = L"#0078D4";
-                cfg.version = 3;
+                cfg.version = 6;
                 cfg.SaveToFile(path);
+            }
+            else if (cfg.version < 6 || missingDefaultProf)
+            {
+                cfg.version = 6;
+                cfg.SaveToFile(path);
+            }
+            else if (smenuNeedsUpgrade)
+            {
+                cfg.SaveProfile(L"SMenu", path);
+            }
+            const std::wstring legacySearch = LegacySearchItemsPath(path);
+            if (GetFileAttributesW(legacySearch.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                cfg.SaveProfile(L"default", path);
+                DeleteFileW(legacySearch.c_str());
             }
             return cfg;
         }

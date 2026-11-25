@@ -3,10 +3,14 @@
 #include <ShlObj.h>
 #include <ShObjIdl.h>
 #include <Shellapi.h>
+#include <d2d1_1.h>
 #include <winhttp.h>
 #include <algorithm>
+#include <cmath>
 #include <cwctype>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "../shared/SearchMatch.h"
@@ -77,12 +81,12 @@ namespace winrings
                     AddAliasUnique(slot.searchAliases, appIndex->FindFriendlyNameForExe(exePath));
                 const std::wstring parent = ParentFolderNameOf(exePath);
                 if (!parent.empty() && parent.size() <= 40)
-                    AddAliasUnique(slot.searchAliases, parent);
+                    AddAliasUnique(slot.secondarySearchAliases, parent);
             }
             for (const auto& w : slot.windows)
-                AddAliasUnique(slot.searchAliases, w.title);
+                AddAliasUnique(slot.secondarySearchAliases, w.title);
             for (const auto& sub : slot.subItems)
-                AddAliasUnique(slot.searchAliases, sub.label);
+                AddAliasUnique(slot.secondarySearchAliases, sub.label);
         }
 
         std::wstring InferLabel(SlotKind kind, const std::wstring& pathOrUrl)
@@ -136,6 +140,306 @@ namespace winrings
                 WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
                 return nullptr;
             return converter;
+        }
+
+        Microsoft::WRL::ComPtr<ID2D1Factory> GetSharedWicD2DFactory()
+        {
+            static std::mutex s_facMutex;
+            static Microsoft::WRL::ComPtr<ID2D1Factory> s_factory;
+            std::lock_guard<std::mutex> lock(s_facMutex);
+            if (!s_factory)
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, s_factory.GetAddressOf());
+            return s_factory;
+        }
+
+        Microsoft::WRL::ComPtr<IWICBitmapSource> RenderBuiltinIconWic(
+            IWICImagingFactory* wic, const std::wstring& spec)
+        {
+            if (!wic || spec.rfind(L"builtin:", 0) != 0)
+                return nullptr;
+
+            static std::mutex s_builtinMutex;
+            static std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<IWICBitmapSource>> s_builtinCache;
+            {
+                std::lock_guard<std::mutex> lock(s_builtinMutex);
+                if (auto it = s_builtinCache.find(spec); it != s_builtinCache.end())
+                    return it->second;
+            }
+
+            Microsoft::WRL::ComPtr<ID2D1Factory> factory = GetSharedWicD2DFactory();
+            if (!factory)
+                return nullptr;
+
+            Microsoft::WRL::ComPtr<IWICBitmap> bmp;
+            if (FAILED(wic->CreateBitmap(64, 64, GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapCacheOnDemand, bmp.GetAddressOf())) || !bmp)
+                return nullptr;
+
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                96.0f, 96.0f);
+            Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt;
+            if (FAILED(factory->CreateWicBitmapRenderTarget(bmp.Get(), props, rt.GetAddressOf())) || !rt)
+                return nullptr;
+
+            auto mk = [&](D2D1_COLOR_F c) {
+                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> br;
+                rt->CreateSolidColorBrush(c, br.GetAddressOf());
+                return br;
+            };
+            auto hex = [](uint32_t rgb, float a = 1.0f) {
+                return D2D1::ColorF(((rgb >> 16) & 0xFFu) / 255.0f,
+                    ((rgb >> 8) & 0xFFu) / 255.0f, (rgb & 0xFFu) / 255.0f, a);
+            };
+
+            rt->BeginDraw();
+            rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+            const std::wstring name = spec.substr(8);
+            if (name == L"windows")
+            {
+                auto b1 = mk(hex(0x38BDF8));
+                auto b2 = mk(hex(0x0284C7));
+                if (b1 && b2)
+                {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(10, 10, 30, 30), 2.5f, 2.5f), b1.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(34, 10, 54, 30), 2.5f, 2.5f), b1.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(10, 34, 30, 54), 2.5f, 2.5f), b2.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(34, 34, 54, 54), 2.5f, 2.5f), b2.Get());
+                }
+            }
+            else if (name == L"power" || name == L"shutdown")
+            {
+                const D2D1_COLOR_F col = (name == L"shutdown") ? hex(0xF87171) : hex(0xE2E8F0);
+                if (auto br = mk(col))
+                {
+                    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> ss;
+                    D2D1_STROKE_STYLE_PROPERTIES sp{};
+                    sp.startCap = D2D1_CAP_STYLE_ROUND;
+                    sp.endCap = D2D1_CAP_STYLE_ROUND;
+                    factory->CreateStrokeStyle(sp, nullptr, 0, ss.GetAddressOf());
+
+                    Microsoft::WRL::ComPtr<ID2D1PathGeometry> pg;
+                    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+                    if (SUCCEEDED(factory->CreatePathGeometry(pg.GetAddressOf())) &&
+                        SUCCEEDED(pg->Open(sink.GetAddressOf())))
+                    {
+                        const float cx = 32.0f, cy = 34.0f, r = 17.5f;
+                        const float startRad = -0.95f;
+                        const float endRad = 3.14159265f * 2.0f - 2.19f;
+                        const D2D1_POINT_2F p0{ cx + r * std::cos(startRad), cy + r * std::sin(startRad) };
+                        const D2D1_POINT_2F p1{ cx + r * std::cos(endRad), cy + r * std::sin(endRad) };
+                        sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddArc(D2D1::ArcSegment(p1, D2D1::SizeF(r, r), 0.0f,
+                            D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                        sink->Close();
+                        rt->DrawGeometry(pg.Get(), br.Get(), 5.0f, ss.Get());
+                    }
+                    rt->DrawLine(D2D1::Point2F(32, 10), D2D1::Point2F(32, 29), br.Get(), 5.0f, ss.Get());
+                }
+            }
+            else if (name == L"restart")
+            {
+                if (auto br = mk(hex(0x34D399)))
+                {
+                    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> ss;
+                    D2D1_STROKE_STYLE_PROPERTIES sp{};
+                    sp.startCap = D2D1_CAP_STYLE_ROUND;
+                    sp.endCap = D2D1_CAP_STYLE_ROUND;
+                    factory->CreateStrokeStyle(sp, nullptr, 0, ss.GetAddressOf());
+
+                    Microsoft::WRL::ComPtr<ID2D1PathGeometry> pg;
+                    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+                    if (SUCCEEDED(factory->CreatePathGeometry(pg.GetAddressOf())) &&
+                        SUCCEEDED(pg->Open(sink.GetAddressOf())))
+                    {
+                        sink->BeginFigure(D2D1::Point2F(46, 22), D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(18, 22), D2D1::SizeF(18, 18), 0.0f,
+                            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(47, 42), D2D1::SizeF(18, 18), 0.0f,
+                            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                        sink->Close();
+                        rt->DrawGeometry(pg.Get(), br.Get(), 4.8f, ss.Get());
+                    }
+                    rt->DrawLine(D2D1::Point2F(48, 13), D2D1::Point2F(48, 24), br.Get(), 4.6f, ss.Get());
+                    rt->DrawLine(D2D1::Point2F(37, 24), D2D1::Point2F(48, 24), br.Get(), 4.6f, ss.Get());
+                }
+            }
+            else if (name == L"switch-user")
+            {
+                if (auto br = mk(hex(0x38BDF8)))
+                {
+                    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(26, 22), 8.5f, 8.5f), br.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(12, 35, 40, 52), 8.5f, 8.5f), br.Get());
+                    rt->DrawLine(D2D1::Point2F(41, 24), D2D1::Point2F(54, 24), br.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(49, 18), D2D1::Point2F(55, 24), br.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(49, 30), D2D1::Point2F(55, 24), br.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(41, 40), D2D1::Point2F(54, 40), br.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(46, 34), D2D1::Point2F(40, 40), br.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(46, 46), D2D1::Point2F(40, 40), br.Get(), 3.6f);
+                }
+            }
+            else if (name == L"settings")
+            {
+                auto metal = mk(hex(0x94A3B8));
+                auto core = mk(hex(0x38BDF8));
+                auto hole = mk(hex(0x1E293B));
+                if (metal && core && hole)
+                {
+                    for (int t = 0; t < 8; ++t)
+                    {
+                        const float ang = t * 45.0f;
+                        rt->SetTransform(D2D1::Matrix3x2F::Rotation(ang, D2D1::Point2F(32, 32)));
+                        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(28, 8, 36, 56), 2.5f, 2.5f), metal.Get());
+                    }
+                    rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(32, 32), 18.0f, 18.0f), metal.Get());
+                    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(32, 32), 10.0f, 10.0f), hole.Get());
+                    rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(32, 32), 10.0f, 10.0f), core.Get(), 2.2f);
+                }
+            }
+            else if (name == L"apps")
+            {
+                auto a1 = mk(hex(0xCBD5E1));
+                auto a2 = mk(hex(0x38BDF8));
+                if (a1 && a2)
+                {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(12, 12, 29, 29), 4.0f, 4.0f), a1.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(35, 12, 52, 29), 4.0f, 4.0f), a2.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(12, 35, 29, 52), 4.0f, 4.0f), a1.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(35, 35, 52, 52), 4.0f, 4.0f), a1.Get());
+                }
+            }
+            else if (name == L"power-opts")
+            {
+                if (auto br = mk(hex(0xFBBF24)))
+                {
+                    Microsoft::WRL::ComPtr<ID2D1PathGeometry> pg;
+                    Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+                    if (SUCCEEDED(factory->CreatePathGeometry(pg.GetAddressOf())) &&
+                        SUCCEEDED(pg->Open(sink.GetAddressOf())))
+                    {
+                        sink->BeginFigure(D2D1::Point2F(36, 9), D2D1_FIGURE_BEGIN_FILLED);
+                        sink->AddLine(D2D1::Point2F(17, 35));
+                        sink->AddLine(D2D1::Point2F(30, 35));
+                        sink->AddLine(D2D1::Point2F(26, 55));
+                        sink->AddLine(D2D1::Point2F(47, 29));
+                        sink->AddLine(D2D1::Point2F(34, 29));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        sink->Close();
+                        rt->FillGeometry(pg.Get(), br.Get());
+                    }
+                }
+            }
+            else if (name == L"system")
+            {
+                auto frame = mk(hex(0x60A5FA));
+                auto screen = mk(hex(0x1E3A5F));
+                if (frame && screen)
+                {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(9, 13, 55, 43), 4.0f, 4.0f), frame.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(13, 17, 51, 39), 2.0f, 2.0f), screen.Get());
+                    rt->FillRectangle(D2D1::RectF(27, 43, 37, 50), frame.Get());
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(20, 49, 44, 53), 2.0f, 2.0f), frame.Get());
+                }
+            }
+            else if (name == L"run")
+            {
+                auto box = mk(hex(0x1E293B));
+                auto rim = mk(hex(0x38BDF8));
+                if (box && rim)
+                {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(10, 14, 54, 50), 6.0f, 6.0f), box.Get());
+                    rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(10, 14, 54, 50), 6.0f, 6.0f), rim.Get(), 3.0f);
+                    rt->DrawLine(D2D1::Point2F(18, 25), D2D1::Point2F(28, 32), rim.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(18, 39), D2D1::Point2F(28, 32), rim.Get(), 3.6f);
+                    rt->DrawLine(D2D1::Point2F(32, 39), D2D1::Point2F(45, 39), rim.Get(), 3.6f);
+                }
+            }
+
+            if (FAILED(rt->EndDraw()))
+                return nullptr;
+
+            {
+                std::lock_guard<std::mutex> lock(s_builtinMutex);
+                if (s_builtinCache.size() > 64)
+                    s_builtinCache.clear();
+                s_builtinCache.emplace(spec, bmp);
+            }
+            return bmp;
+        }
+
+        Microsoft::WRL::ComPtr<IWICBitmapSource> OverlayAdminShieldBadge(
+            IWICImagingFactory* wic, IWICBitmapSource* baseIcon)
+        {
+            if (!wic || !baseIcon)
+                return baseIcon;
+
+            static std::mutex s_badgeMutex;
+            static std::unordered_map<IWICBitmapSource*, Microsoft::WRL::ComPtr<IWICBitmapSource>> s_badgeCache;
+            {
+                std::lock_guard<std::mutex> lock(s_badgeMutex);
+                if (auto it = s_badgeCache.find(baseIcon); it != s_badgeCache.end())
+                    return it->second;
+            }
+
+            Microsoft::WRL::ComPtr<ID2D1Factory> factory = GetSharedWicD2DFactory();
+            if (!factory)
+                return baseIcon;
+
+            Microsoft::WRL::ComPtr<IWICBitmap> bmp;
+            if (FAILED(wic->CreateBitmap(64, 64, GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapCacheOnDemand, bmp.GetAddressOf())) || !bmp)
+                return baseIcon;
+
+            const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                96.0f, 96.0f);
+            Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt;
+            if (FAILED(factory->CreateWicBitmapRenderTarget(bmp.Get(), props, rt.GetAddressOf())) || !rt)
+                return baseIcon;
+
+            Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBase;
+            rt->CreateBitmapFromWicBitmap(baseIcon, d2dBase.GetAddressOf());
+            if (!d2dBase)
+                return baseIcon;
+
+            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBr, blueBr, goldBr;
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.95f, 0.97f, 1.0f, 0.95f), borderBr.GetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.14f, 0.45f, 0.92f, 1.0f), blueBr.GetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.98f, 0.75f, 0.14f, 1.0f), goldBr.GetAddressOf());
+
+            rt->BeginDraw();
+            rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+            rt->DrawBitmap(d2dBase.Get(), D2D1::RectF(0, 0, 64, 64));
+
+            if (borderBr && blueBr && goldBr)
+            {
+                // Clean 22x22 UAC-style shield badge at bottom-right
+                const D2D1_RECT_F badge = D2D1::RectF(40.0f, 40.0f, 62.0f, 62.0f);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(badge, 5.0f, 5.0f), borderBr.Get());
+                rt->FillRectangle(D2D1::RectF(42.5f, 42.5f, 51.0f, 51.0f), blueBr.Get());
+                rt->FillRectangle(D2D1::RectF(51.0f, 42.5f, 59.5f, 51.0f), goldBr.Get());
+                rt->FillRectangle(D2D1::RectF(42.5f, 51.0f, 51.0f, 59.5f), goldBr.Get());
+                rt->FillRectangle(D2D1::RectF(51.0f, 51.0f, 59.5f, 59.5f), blueBr.Get());
+            }
+
+            if (FAILED(rt->EndDraw()))
+                return baseIcon;
+
+            {
+                std::lock_guard<std::mutex> lock(s_badgeMutex);
+                if (s_badgeCache.size() > 64)
+                    s_badgeCache.clear();
+                s_badgeCache.emplace(baseIcon, bmp);
+            }
+            return bmp;
         }
 
         void PopulateFolderSubItems(RingSlot& folderSlot, const std::wstring& folderPath, int maxItems, WindowTracker& tracker)
@@ -257,24 +561,50 @@ namespace winrings
             slot.label = cfg.label.empty() ? InferLabel(cfg.kind, expanded) : cfg.label;
             slot.pathOrUrl = expanded;
             slot.isPinned = true;
-            slot.maxFolderItems = std::clamp(cfg.maxFolderItems, 1, 9);
+            slot.runAsAdmin = cfg.runAsAdmin;
+            slot.arguments = SlotModel::ExpandEnv(cfg.arguments);
+            slot.maxFolderItems = std::clamp(cfg.maxFolderItems, 1, 12);
 
             std::wstring resolvedExePath = expanded;
             if (cfg.kind == SlotKind::App)
             {
                 const std::wstring key = WindowTracker::NormalizeAppKey(expanded, cfg.label);
                 bool matched = false;
+                auto bindGroup = [&](const AppWindowGroup& grp) {
+                    slot.windows = grp.windows;
+                    if (!grp.exePath.empty())
+                        resolvedExePath = grp.exePath;
+                    slot.iconBitmap = grp.iconBitmap ? grp.iconBitmap : tracker.GetShellIconBitmap(expanded);
+                    consumedKeys.insert(grp.normalizedKey);
+                    matched = true;
+                };
+
+                // Exact path match first (including runAsAdmin apps so CMD/PowerShell Admin link to open windows)
                 for (const auto& grp : running)
                 {
                     if (WindowTracker::AppKeysMatch(grp.normalizedKey, key))
                     {
-                        slot.windows = grp.windows;
-                        if (!grp.exePath.empty())
-                            resolvedExePath = grp.exePath;
-                        slot.iconBitmap = grp.iconBitmap ? grp.iconBitmap : tracker.GetShellIconBitmap(expanded);
-                        consumedKeys.insert(grp.normalizedKey);
-                        matched = true;
+                        bindGroup(grp);
                         break;
+                    }
+                }
+                // Fallback: match by executable filename (handles e.g. System32 vs SysWOW64 powershell.exe / cmd.exe)
+                if (!matched && !expanded.empty())
+                {
+                    const size_t slash = expanded.find_last_of(L"\\/");
+                    const std::wstring cfgExeName = (slash != std::wstring::npos) ? expanded.substr(slash + 1) : expanded;
+                    if (!cfgExeName.empty() && _wcsicmp(cfgExeName.c_str(), L"explorer.exe") != 0)
+                    {
+                        for (const auto& grp : running)
+                        {
+                            const size_t gSlash = grp.exePath.find_last_of(L"\\/");
+                            const std::wstring gName = (gSlash != std::wstring::npos) ? grp.exePath.substr(gSlash + 1) : grp.exePath;
+                            if (!gName.empty() && _wcsicmp(gName.c_str(), cfgExeName.c_str()) == 0)
+                            {
+                                bindGroup(grp);
+                                break;
+                            }
+                        }
                     }
                 }
                 if (!matched)
@@ -288,6 +618,12 @@ namespace winrings
                     auto explorerIcon = tracker.GetShellIconBitmap(!expanded.empty() ? expanded : resolvedExePath);
                     if (explorerIcon)
                         slot.iconBitmap = std::move(explorerIcon);
+                }
+                else if (_wcsicmp(stem.c_str(), L"control") == 0)
+                {
+                    CollectMatchingExplorerWindows(running, slot.windows, [](const std::wstring& title) {
+                        return ExplorerWindowMatchesControlPanel(title);
+                    });
                 }
 
                 std::wstring friendly = isExplorer
@@ -311,10 +647,22 @@ namespace winrings
                         return SlotModel::ExplorerWindowMatchesFolder(title, expanded);
                     });
                 }
+                else if (cfg.kind == SlotKind::File && expanded.rfind(L"ms-settings:", 0) == 0)
+                {
+                    for (const auto& grp : running)
+                    {
+                        if (IsSystemSettingsExePath(grp.exePath))
+                        {
+                            slot.windows = grp.windows;
+                            consumedKeys.insert(grp.normalizedKey);
+                            break;
+                        }
+                    }
+                }
             }
             else if (cfg.kind == SlotKind::Website)
             {
-                if (!cfg.iconCacheFile.empty())
+                if (!cfg.iconCacheFile.empty() && cfg.iconCacheFile.rfind(L"builtin:", 0) != 0)
                 {
                     const std::wstring fullIcon = (cfg.iconCacheFile.find(L':') != std::wstring::npos)
                         ? cfg.iconCacheFile
@@ -336,6 +684,29 @@ namespace winrings
                 for (const auto& child : cfg.items)
                     slot.subItems.push_back(CreateSlotFromConfig(child, running, consumedKeys, tracker, wicFactory, appIndex));
             }
+
+            if (cfg.iconCacheFile.rfind(L"builtin:", 0) == 0)
+            {
+                auto builtinBmp = RenderBuiltinIconWic(wicFactory, cfg.iconCacheFile);
+                if (builtinBmp)
+                    slot.iconBitmap = std::move(builtinBmp);
+            }
+            else if (!cfg.iconCacheFile.empty() && cfg.kind != SlotKind::Website)
+            {
+                const std::wstring expandedIcon = SlotModel::ExpandEnv(cfg.iconCacheFile);
+                const std::wstring fullIcon = (expandedIcon.find(L':') != std::wstring::npos ||
+                    expandedIcon.rfind(L"\\\\", 0) == 0)
+                    ? expandedIcon
+                    : (SwitcherConfig::AppDataDirectory() + L"\\" + expandedIcon);
+                auto customBmp = LoadImageFromFileWic(wicFactory, fullIcon);
+                if (!customBmp)
+                    customBmp = tracker.GetShellIconBitmap(fullIcon);
+                if (customBmp)
+                    slot.iconBitmap = std::move(customBmp);
+            }
+
+            if (cfg.runAsAdmin && slot.iconBitmap)
+                slot.iconBitmap = OverlayAdminShieldBadge(wicFactory, slot.iconBitmap.Get());
 
             const HWND frontmost = tracker.LastActiveWindow();
             for (const auto& w : slot.windows)
@@ -384,21 +755,25 @@ namespace winrings
         const SwitcherConfig& config,
         WindowTracker& tracker,
         IWICImagingFactory* wicFactory,
-        const AppIndex* appIndex)
+        const AppIndex* appIndex,
+        const std::wstring& profileId)
     {
+        const RingProfileConfig& activeProf = config.ResolveProfile(profileId);
         const auto running = tracker.EnumerateGroupedWindows(ignoreHwnd);
         const HWND frontmost = tracker.LastActiveWindow();
         std::vector<RingSlot> slots;
         std::unordered_set<std::wstring> consumedKeys;
 
-        for (const auto& pinned : config.pinnedSlots)
+        for (const auto& pinned : activeProf.pinnedSlots)
         {
+            if (pinned.hiddenFromRing)
+                continue;
             if (static_cast<int>(slots.size()) >= config.maxSlots)
                 break;
             slots.push_back(CreateSlotFromConfig(pinned, running, consumedKeys, tracker, wicFactory, appIndex));
         }
 
-        if (config.includeUnpinnedRunningApps)
+        if (activeProf.includeRunningApps)
         {
             for (const auto& grp : running)
             {
@@ -440,13 +815,103 @@ namespace winrings
         return slots;
     }
 
-    void SlotModel::LaunchPathOrUrl(const std::wstring& pathOrUrl, const std::wstring& arguments)
+    RingSlot SlotModel::BuildSearchSlot(
+        const PinnedSlotConfig& cfg,
+        const std::vector<AppWindowGroup>& running,
+        WindowTracker& tracker,
+        IWICImagingFactory* wicFactory,
+        const AppIndex* appIndex,
+        const std::wstring& sourceProfileId)
+    {
+        std::unordered_set<std::wstring> scratchConsumed;
+        RingSlot slot = CreateSlotFromConfig(cfg, running, scratchConsumed, tracker, wicFactory, appIndex);
+        slot.isPinned = false;
+        slot.isHiddenPin = true;
+        slot.sourceProfileId = sourceProfileId.empty() ? L"default" : sourceProfileId;
+
+        const std::wstring expanded = ExpandEnv(cfg.pathOrUrl);
+        for (const auto& alias : BuildBasicSearchAliases(slot.label, expanded))
+        {
+            const std::wstring lowAlias = ToLowerFold(alias);
+            bool exists = false;
+            for (const auto& cur : slot.searchAliases)
+            {
+                if (ToLowerFold(cur) == lowAlias)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists)
+                slot.searchAliases.push_back(alias);
+        }
+        return slot;
+    }
+
+    void SlotModel::LaunchPathOrUrl(const std::wstring& pathOrUrl, const std::wstring& arguments, bool runAsAdmin)
     {
         if (pathOrUrl.empty())
             return;
 
+        if (_wcsicmp(pathOrUrl.c_str(), L"winrings://power/switch-user") == 0)
+        {
+            bool ok = false;
+            if (HMODULE wts = LoadLibraryExW(L"wtsapi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            {
+                using WtsDisconnectFn = BOOL (WINAPI*)(HANDLE, DWORD, BOOL);
+                if (auto fn = reinterpret_cast<WtsDisconnectFn>(GetProcAddress(wts, "WTSDisconnectSession")))
+                    ok = fn(nullptr, 0xFFFFFFFFu /* WTS_CURRENT_SESSION */, FALSE) != FALSE;
+                FreeLibrary(wts);
+            }
+            if (!ok)
+                LockWorkStation();
+            return;
+        }
+        if (_wcsicmp(pathOrUrl.c_str(), L"winrings://power/shutdown") == 0 ||
+            _wcsicmp(pathOrUrl.c_str(), L"winrings://power/restart") == 0)
+        {
+            const bool isRestart = (_wcsicmp(pathOrUrl.c_str(), L"winrings://power/restart") == 0);
+            const std::wstring exe = ExpandEnv(L"%SystemRoot%\\System32\\shutdown.exe");
+            const wchar_t* args = isRestart ? L"/r /t 0" : L"/s /t 0";
+            std::wstring cmd = L"\"" + exe + L"\" " + args;
+            std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+            buf.push_back(L'\0');
+            STARTUPINFOW si{ sizeof(si) };
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE,
+                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+            {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
+            else
+            {
+                ShellExecuteW(nullptr, L"open", exe.c_str(), args, nullptr, SW_HIDE);
+            }
+            return;
+        }
+        if (_wcsicmp(pathOrUrl.c_str(), L"winrings://system/run-dialog") == 0)
+        {
+            ShellExecuteW(nullptr, L"open", L"explorer.exe",
+                L"shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}", nullptr, SW_SHOWNORMAL);
+            return;
+        }
+        if (_wcsicmp(pathOrUrl.c_str(), L"winrings://system/start-menu") == 0)
+        {
+            INPUT in[2]{};
+            in[0].type = INPUT_KEYBOARD;
+            in[0].ki.wVk = VK_LWIN;
+            in[0].ki.dwExtraInfo = 0x5752494Eu; // kWinRingsInjectedExtra
+            in[1].type = INPUT_KEYBOARD;
+            in[1].ki.wVk = VK_LWIN;
+            in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            in[1].ki.dwExtraInfo = 0x5752494Eu;
+            SendInput(2, in, sizeof(INPUT));
+            return;
+        }
+
         constexpr const wchar_t* kAppsPrefix = L"shell:AppsFolder\\";
-        if (arguments.empty() && pathOrUrl.rfind(kAppsPrefix, 0) == 0)
+        if (!runAsAdmin && arguments.empty() && pathOrUrl.rfind(kAppsPrefix, 0) == 0)
         {
             const std::wstring aumid = pathOrUrl.substr(wcslen(kAppsPrefix));
             Microsoft::WRL::ComPtr<IApplicationActivationManager> aam;
@@ -468,8 +933,8 @@ namespace winrings
         }
 
         SHELLEXECUTEINFOW sei{ sizeof(sei) };
-        sei.fMask = SEE_MASK_FLAG_NO_UI;
-        sei.lpVerb = L"open";
+        sei.fMask = runAsAdmin ? 0 : SEE_MASK_FLAG_NO_UI;
+        sei.lpVerb = runAsAdmin ? L"runas" : L"open";
         sei.lpFile = pathOrUrl.c_str();
         sei.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
         sei.nShow = SW_SHOWNORMAL;

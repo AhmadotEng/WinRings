@@ -28,7 +28,7 @@ if ($mapped -and ($mapped.FileName -ine $shellDll)) {
 }
 
 Write-Host "==> Starting WinRingsHost.exe (Explorer PID = $origExplorerPid)"
-$proc = Start-Process -FilePath $hostExe -PassThru
+$proc = Start-Process -FilePath $hostExe -ArgumentList '--no-tray' -PassThru
 $ready = $false
 try {
     for ($i = 0; $i -lt 48; $i++) {

@@ -25,7 +25,7 @@ Compiles 5 targets cleanly and writes staged outputs under `build\stage\`:
 | **`[1/5]`** | `build\tests\WinRingsTests.exe` | Links `WinRingsConfig.cpp` + `tests\WinRingsTests.cpp` (`/SUBSYSTEM:CONSOLE`). |
 | **`[2/5]`** | `build\bin\WinRingsShell.dll` | Links `WinRingsConfig.cpp` + all `src\shell\*.cpp` + `WinRingsShell.def` (`D3D11`, `D2D1`, `DWrite`, `DComp`, `DXGI`, `Dwmapi`, `WIC`, `WinHTTP`, `UxTheme`, `WindowsApp`). |
 | **`[3/5]`** | `build\bin\WinRingsHost.exe` | Links `WinRingsConfig.cpp` + `WinRingsHost.cpp` + `WinRingsHost.manifest` (`Wtsapi32`, `Bcrypt`). |
-| **`[4/5]`** | `build\bin\WinRingsTools.exe` | Links `WinRingsConfig.cpp` + `SettingsDialog.cpp` + `WinRingsTools.cpp` + `WinRingsTools.manifest`. |
+| **`[4/5]`** | `build\bin\WinRingsTools.exe` | Links `WinRingsConfig.cpp` + `TrayApp.cpp` + `WinRingsTools.cpp` + `WinRingsTools.manifest`. |
 | **`[5/5]`** | `build\bin\WinRingsSetup.exe` | Computes SHA-256 digests of `WinRingsHost.exe`, `WinRingsShell.dll`, and `WinRingsTools.exe` into `build\gen\payload_hashes.h`, embeds all 3 binaries as `RT_RCDATA` (`101`, `102`, `103`), and links `WinRingsSetup.cpp`. |
 
 Staged deliverables:
@@ -53,8 +53,9 @@ Must finish with **`Test-WinRingsProduct: ALL CHECKS PASSED`** across all 5 auto
    - `TestDownloadsAndSubmenuHoverTransitions` — Annular arc band hit-testing, direct switch across main-ring slots, top search arc transition (`-2`), outer reach cap.
    - `TestSearchScoring` — 4-tier matcher (prefix, word/CamelCase, acronym, substring, aliases).
    - `TestCrashGuard` — 3-in-180s sliding failure window and reset behavior.
-   - `TestConfigRoundTrip` — JSON serialization/deserialization, defaults (`A4S`, `glassLevel = 50`, `lightDarkMode = 0`), clamps, pinned slots & collections.
-   - `TestThemeMaterialEngine` — `A4S`, `DarkWood`, `Blue` slider curves, custom accent parsing, `GenerateAcrylicNoiseBgra256` mid-gray peak bounds.
+   - `TestConfigRoundTrip` — JSON v4 serialization/deserialization, defaults (`A4SAcrylic`, `glassLevel = 50`, `lightDarkMode = 0`, 2 default triggers), clamps, pinned slots & collections, and v2/v3 -> v4 migration.
+   - `TestThemeMaterialEngine` — `A4SAcrylic` calibrated native values, `TaskbarGlass` wide HostBackdrop curves, `PureMatte` zero-blur tint, arbitrary custom `surfaceColor` / `accentColor` parsing, and `GenerateAcrylicNoiseBgra256` mid-gray peak bounds.
+   - `TestTriggerModelAndDeltaIpc` — Key normalization (`RWin`/`RAlt`/`RCtrl`/`RShift`), `FormatTriggerBinding`, `AnalyzeTriggerConflict` notes, and surgical `ApplyDeltaToConfig` updates preserving `pinnedSlots`.
    - `TestSlotMatchingAndPreviews` — Explorer path detection, Downloads/Recycle Bin matching, PiP gating strictly on `SlotKind::App`.
    - `TestDragSpringAndReorder` — `500 ms` dwell + `420 ms` double-heartbeat pulse curve, reorder target clamping, vector element rotation.
 
@@ -62,13 +63,16 @@ Must finish with **`Test-WinRingsProduct: ALL CHECKS PASSED`** across all 5 auto
 
 ## 4. Safe Interactive & Live Testing
 
-### Non-Injecting Preview & Settings (Recommended During Development)
+### Non-Injecting Preview & Tray Flyout (Recommended During Development)
 ```powershell
-# Standalone radial overlay outside explorer.exe (tests WCA glass, 3D bezels, hit-testing)
+# Standalone radial overlay outside explorer.exe (tests WCA glass, TaskbarGlass, PureMatte, 3D bezels, hit-testing)
 .\build\stage\WinRings\WinRingsHost.exe --preview
 
-# 4-page Settings & 1:1 GPU preview window
-.\build\stage\WinRings\WinRingsTools.exe --settings
+# Independent Tray Icon + 376x524 Control Flyout (connects to Host or --preview via WM_COPYDATA)
+.\build\stage\WinRings\WinRingsTools.exe --open
+
+# Cleanly exit Tray app without affecting the Ring
+.\build\stage\WinRings\WinRingsTools.exe --quit
 ```
 
 ### Opt-In Live Explorer Lifecycle Gate

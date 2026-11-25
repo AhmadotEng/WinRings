@@ -9,7 +9,9 @@
 #include "../src/shared/RingThemeEngine.h"
 #include "../src/shared/SearchMatch.h"
 #include "../src/shared/SlotMatching.h"
+#include "../src/shared/TriggerModel.h"
 #include "../src/shared/WinRingsConfig.h"
+#include "../src/shared/WinRingsDeltaIpc.h"
 
 using namespace winrings;
 
@@ -485,64 +487,144 @@ static void TestConfigRoundTrip()
     CreateDirectoryW(testDir.c_str(), nullptr);
 
     const std::wstring cfgPath = testDir + L"\\config.json";
+    const std::wstring profDir = testDir + L"\\profiles";
     SwitcherConfig orig = SwitcherConfig::CreateDefault();
-    CHECK(orig.version == 3);
-    CHECK(orig.theme == RingTheme::A4S);
+    CHECK(orig.version == 6);
+    CHECK(orig.profiles.size() == 2);
+    CHECK(orig.FindProfile(L"default") != nullptr);
+    const RingProfileConfig* smenu = orig.FindProfile(L"SMenu");
+    CHECK(smenu != nullptr);
+    CHECK(!smenu->includeRunningApps);
+    CHECK(smenu->pinnedSlots.size() == 6);
+    CHECK(smenu->pinnedSlots[0].kind == SlotKind::Collection && smenu->pinnedSlots[0].items.size() == 11);
+    CHECK(smenu->pinnedSlots[1].runAsAdmin == true);
+    CHECK(smenu->pinnedSlots[2].runAsAdmin == true);
+    CHECK(smenu->pinnedSlots[3].kind == SlotKind::Collection && smenu->pinnedSlots[3].items.size() == 3);
+    CHECK(smenu->pinnedSlots[3].pathOrUrl.empty());
+    CHECK(smenu->pinnedSlots[3].items[0].id == L"smenu-restart");
+    CHECK(smenu->pinnedSlots[3].items[1].id == L"smenu-shutdown");
+    CHECK(smenu->pinnedSlots[3].items[2].id == L"smenu-switch-user");
+    const IconArcLayout bottomPowerArc = ComputeIconArcLayout(340.0, 340.0, kPi * 0.5, 149.0, 3);
+    CHECK(bottomPowerArc.rects.size() == 3);
+    const double restartCenterX = bottomPowerArc.rects[0].left + bottomPowerArc.rects[0].width * 0.5;
+    const double shutCenterX = bottomPowerArc.rects[1].left + bottomPowerArc.rects[1].width * 0.5;
+    const double switchCenterX = bottomPowerArc.rects[2].left + bottomPowerArc.rects[2].width * 0.5;
+    CHECK(restartCenterX > 340.0 && std::abs(shutCenterX - 340.0) < 0.1 && switchCenterX < 340.0);
+    CHECK(smenu->pinnedSlots[4].pathOrUrl == L"ms-settings:");
+    CHECK(smenu->pinnedSlots[5].pathOrUrl.find(L"control.exe") != std::wstring::npos);
+    CHECK(orig.surfaceTexture == SurfaceTexture::A4SAcrylic);
+    CHECK(!orig.useCustomSurfaceColor);
+    CHECK(orig.surfaceColor == L"#202020");
     CHECK(orig.glassLevel == 50);
     CHECK(orig.lightDarkMode == 0);
     CHECK(orig.accentColor == L"#0078D4");
+    CHECK(orig.triggers.size() == 2);
     CHECK(orig.SaveToFile(cfgPath));
     SwitcherConfig loadedDefault;
     CHECK(SwitcherConfig::LoadFromFile(cfgPath, loadedDefault));
-    CHECK(loadedDefault.version == 3);
-    CHECK(loadedDefault.theme == RingTheme::A4S);
+    CHECK(loadedDefault.version == 6);
+    CHECK(loadedDefault.profiles.size() == 2);
+    CHECK(loadedDefault.surfaceTexture == SurfaceTexture::A4SAcrylic);
     CHECK(loadedDefault.glassLevel == 50);
     CHECK(loadedDefault.lightDarkMode == 0);
+    CHECK(loadedDefault.triggers.size() == 2);
+    CHECK(loadedDefault.triggers[0].kind == TriggerKind::MouseButton);
+    CHECK(loadedDefault.triggers[1].kind == TriggerKind::KeyChord);
 
-    orig.mouseTrigger = MouseTriggerButton::Middle;
-    orig.theme = RingTheme::DarkWood;
+    orig.surfaceTexture = SurfaceTexture::PureMatte;
+    orig.useCustomSurfaceColor = true;
+    orig.surfaceColor = L"#0F3B2E";
     orig.glassLevel = 86;
     orig.lightDarkMode = 15;
     orig.accentColor = L"#FF5522";
-    orig.menuKeyEnabled = true;
-    orig.interceptWinTab = true;
+    orig.autoLightDark = true;
+    orig.autoWindowsAccent = true;
+    orig.gestureTapOpenClose = false;
+    orig.gestureHoldReleaseSwitch = true;
+    orig.triggers = {
+        TriggerBinding{ TriggerKind::SoloModifier, MouseTriggerButton::Disabled, 0, VK_LWIN, L"work" },
+        TriggerBinding{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_ALT, VK_TAB, L"default" }
+    };
+    orig.SyncLegacyTriggerMirrors();
     orig.pinnedSlots.push_back(PinnedSlotConfig{
         L"col-1", SlotKind::Collection, L"Dev", L"", L"", 8,
         { PinnedSlotConfig{ L"site-1", SlotKind::Website, L"Example", L"https://example.com", L"icons\\example.ico", 8, {} } }
+    });
+    orig.SyncDefaultProfileMirror();
+    orig.profiles.push_back(RingProfileConfig{
+        L"work", L"Work", false,
+        { PinnedSlotConfig{ L"w-cmd", SlotKind::App, L"Cmd Admin", L"cmd.exe", L"", 8, {}, true, L"/k echo hi" } }
     });
 
     CHECK(orig.SaveToFile(cfgPath));
     SwitcherConfig loaded;
     CHECK(SwitcherConfig::LoadFromFile(cfgPath, loaded));
-    CHECK(loaded.mouseTrigger == MouseTriggerButton::Middle);
-    CHECK(loaded.theme == RingTheme::DarkWood);
+    CHECK(loaded.surfaceTexture == SurfaceTexture::PureMatte);
+    CHECK(loaded.useCustomSurfaceColor == true);
+    CHECK(loaded.surfaceColor == L"#0F3B2E");
     CHECK(loaded.glassLevel == 86);
     CHECK(loaded.lightDarkMode == 15);
     CHECK(loaded.accentColor == L"#FF5522");
-    CHECK(loaded.menuKeyEnabled == true);
-    CHECK(loaded.interceptWinTab == true);
+    CHECK(loaded.autoLightDark == true);
+    CHECK(loaded.autoWindowsAccent == true);
+    CHECK(loaded.gestureTapOpenClose == false);
+    CHECK(loaded.gestureHoldReleaseSwitch == true);
+    CHECK(loaded.triggers.size() == 2);
+    CHECK(loaded.triggers[0].kind == TriggerKind::SoloModifier);
+    CHECK(loaded.triggers[0].vk == VK_LWIN);
+    CHECK(loaded.triggers[0].profileId == L"work");
+    CHECK(loaded.triggers[1].kind == TriggerKind::KeyChord);
+    CHECK(loaded.triggers[1].modifiers == MOD_ALT && loaded.triggers[1].vk == VK_TAB);
     CHECK(loaded.pinnedSlots.size() == 4);
     CHECK(loaded.pinnedSlots[3].kind == SlotKind::Collection);
     CHECK(loaded.pinnedSlots[3].items.size() == 1);
     CHECK(loaded.pinnedSlots[3].items[0].pathOrUrl == L"https://example.com");
+    CHECK(loaded.profiles.size() == 3);
+    const RingProfileConfig* loadedWork = loaded.FindProfile(L"work");
+    CHECK(loadedWork != nullptr && !loadedWork->includeRunningApps);
+    CHECK(loadedWork->pinnedSlots.size() == 1 && loadedWork->pinnedSlots[0].runAsAdmin);
+    CHECK(loadedWork->pinnedSlots[0].arguments == L"/k echo hi");
 
-    orig.theme = RingTheme::Blue;
-    orig.glassLevel = 45;
-    orig.lightDarkMode = 80;
-    CHECK(orig.SaveToFile(cfgPath));
-    SwitcherConfig loadedBlue;
-    CHECK(SwitcherConfig::LoadFromFile(cfgPath, loadedBlue));
-    CHECK(loadedBlue.theme == RingTheme::Blue);
-    CHECK(loadedBlue.glassLevel == 45);
-    CHECK(loadedBlue.lightDarkMode == 80);
+    // Migrating v4 config preserves user pins in "default" and adds built-in "SMenu"
+    SwitcherConfig v4Mig;
+    CHECK(SwitcherConfig::ParseJsonUtf8(
+        "{\"version\":4,\"pinnedSlots\":[{\"id\":\"p1\",\"kind\":\"App\",\"label\":\"Notepad\",\"pathOrUrl\":\"notepad.exe\"}]}",
+        v4Mig));
+    CHECK(v4Mig.profiles.size() == 2);
+    CHECK(v4Mig.profiles[0].id == L"default" && v4Mig.profiles[0].pinnedSlots.size() == 1);
+    CHECK(v4Mig.profiles[0].pinnedSlots[0].label == L"Notepad");
+    CHECK(v4Mig.FindProfile(L"SMenu") != nullptr);
 
     SwitcherConfig clamped;
     CHECK(SwitcherConfig::ParseJsonUtf8(
         "{\"version\":3,\"theme\":\"DarkWood\",\"glassLevel\":150,\"lightDarkMode\":-25}",
         clamped));
-    CHECK(clamped.theme == RingTheme::DarkWood);
+    CHECK(clamped.surfaceTexture == SurfaceTexture::PureMatte);
     CHECK(clamped.glassLevel == 100);
     CHECK(clamped.lightDarkMode == 0);
+
+    SwitcherConfig legacyBlue;
+    CHECK(SwitcherConfig::ParseJsonUtf8(
+        "{\"version\":3,\"theme\":\"Blue\",\"mouseTrigger\":\"Middle\",\"interceptWinTab\":true}",
+        legacyBlue));
+    CHECK(legacyBlue.surfaceTexture == SurfaceTexture::TaskbarGlass);
+    CHECK(legacyBlue.useCustomSurfaceColor == true);
+    CHECK(legacyBlue.surfaceColor == L"#142A52");
+    CHECK(legacyBlue.triggers.size() == 3);
+    CHECK(legacyBlue.triggers[0].mouseButton == MouseTriggerButton::Middle);
+    CHECK(legacyBlue.triggers[2].modifiers == MOD_WIN && legacyBlue.triggers[2].vk == VK_TAB);
+
+    SwitcherConfig legacyAll5;
+    CHECK(SwitcherConfig::ParseJsonUtf8(
+        "{\"version\":3,\"mouseTrigger\":\"SideForward\",\"hotkeyEnabled\":true,\"hotkeyModifiers\":1,"
+        "\"hotkeyVk\":32,\"interceptAltTab\":true,\"interceptWinTab\":true,\"menuKeyEnabled\":true}",
+        legacyAll5));
+    CHECK(legacyAll5.triggers.size() == 5);
+    CHECK(legacyAll5.triggers[0].kind == TriggerKind::MouseButton && legacyAll5.triggers[0].mouseButton == MouseTriggerButton::SideForward);
+    CHECK(legacyAll5.triggers[1].kind == TriggerKind::KeyChord && legacyAll5.triggers[1].modifiers == MOD_ALT && legacyAll5.triggers[1].vk == VK_SPACE);
+    CHECK(legacyAll5.triggers[2].kind == TriggerKind::KeyChord && legacyAll5.triggers[2].modifiers == MOD_ALT && legacyAll5.triggers[2].vk == VK_TAB);
+    CHECK(legacyAll5.triggers[3].kind == TriggerKind::KeyChord && legacyAll5.triggers[3].modifiers == MOD_WIN && legacyAll5.triggers[3].vk == VK_TAB);
+    CHECK(legacyAll5.triggers[4].kind == TriggerKind::KeyChord && legacyAll5.triggers[4].modifiers == 0 && legacyAll5.triggers[4].vk == VK_APPS);
 
     for (const char* legacyJson : {
         "{\"version\":2,\"theme\":\"LiquidGlass\"}",
@@ -552,20 +634,186 @@ static void TestConfigRoundTrip()
     {
         SwitcherConfig legacyCfg;
         CHECK(SwitcherConfig::ParseJsonUtf8(legacyJson, legacyCfg));
-        CHECK(legacyCfg.theme == RingTheme::A4S);
+        CHECK(legacyCfg.surfaceTexture == SurfaceTexture::A4SAcrylic);
+        CHECK(!legacyCfg.useCustomSurfaceColor);
     }
 
     SwitcherConfig bad;
     CHECK(!SwitcherConfig::ParseJsonUtf8("{ not valid json", bad));
 
+    DeleteFileW((profDir + L"\\default.json").c_str());
+    DeleteFileW((profDir + L"\\SMenu.json").c_str());
+    DeleteFileW((profDir + L"\\work.json").c_str());
+    RemoveDirectoryW(profDir.c_str());
+    DeleteFileW((testDir + L"\\search.json").c_str());
     DeleteFileW(cfgPath.c_str());
     RemoveDirectoryW(testDir.c_str());
 }
 
+static void TestPerProfileConfigFiles()
+{
+    CHECK(SwitcherConfig::SanitizeProfileId(L"  My:Work/Prof*?  ") == L"MyWorkProf");
+    CHECK(SwitcherConfig::SanitizeProfileId(L"... ") == L"profile");
+    CHECK(SwitcherConfig::SanitizeProfileId(L"") == L"profile");
+    CHECK(SwitcherConfig::SanitizeProfileId(L"VeryLongProfileIdentifierNameOverTwentyEightChars").size() == 28);
+
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(_countof(tempDir), tempDir);
+    const std::wstring testDir = std::wstring(tempDir) + L"WinRingsProfTest_" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring cfgPath = testDir + L"\\config.json";
+    const std::wstring profDir = testDir + L"\\profiles";
+    CreateDirectoryW(testDir.c_str(), nullptr);
+
+    SwitcherConfig cfg = SwitcherConfig::CreateDefault();
+    cfg.profiles.push_back(RingProfileConfig{
+        L"work", L"Work", false,
+        { PinnedSlotConfig{ L"w-app", SlotKind::App, L"Notepad", L"notepad.exe", L"", 8, {}, false, L"" } }
+    });
+    CHECK(cfg.SaveToFile(cfgPath));
+
+    // config.json must stay clean global config (without inline profiles/pinnedSlots bloat)
+    HANDLE hCfg = CreateFileW(cfgPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(hCfg != INVALID_HANDLE_VALUE);
+    if (hCfg != INVALID_HANDLE_VALUE)
+    {
+        LARGE_INTEGER sz{};
+        GetFileSizeEx(hCfg, &sz);
+        std::string raw(static_cast<size_t>(sz.QuadPart), '\0');
+        DWORD rd = 0;
+        ReadFile(hCfg, raw.data(), static_cast<DWORD>(raw.size()), &rd, nullptr);
+        CloseHandle(hCfg);
+        CHECK(raw.find("\"profiles\"") == std::string::npos);
+        CHECK(raw.find("\"pinnedSlots\"") == std::string::npos);
+    }
+
+    // Standalone profile files must exist and load individually via the exact same schema
+    RingProfileConfig defDisk, smenuDisk, workDisk;
+    CHECK(RingProfileConfig::LoadFromFile(SwitcherConfig::ProfileFilePath(L"default", cfgPath), defDisk));
+    CHECK(RingProfileConfig::LoadFromFile(SwitcherConfig::ProfileFilePath(L"SMenu", cfgPath), smenuDisk));
+    CHECK(RingProfileConfig::LoadFromFile(SwitcherConfig::ProfileFilePath(L"work", cfgPath), workDisk));
+    CHECK(defDisk.id == L"default" && defDisk.includeRunningApps);
+    CHECK(smenuDisk.id == L"SMenu" && smenuDisk.pinnedSlots.size() == 6);
+    CHECK(workDisk.id == L"work" && workDisk.pinnedSlots.size() == 1);
+
+    // Dropping a brand-new standalone profile JSON file into profiles/ must be discovered cleanly
+    RingProfileConfig gaming;
+    gaming.id = L"gaming";
+    gaming.name = L"Gaming";
+    gaming.includeRunningApps = false;
+    gaming.pinnedSlots.push_back(PinnedSlotConfig{ L"g-1", SlotKind::Website, L"Steam", L"https://store.steampowered.com", L"", 8, {} });
+    CHECK(gaming.SaveToFile(SwitcherConfig::ProfileFilePath(L"gaming", cfgPath)));
+
+    SwitcherConfig reloaded;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, reloaded));
+    CHECK(reloaded.profiles.size() == 4);
+    CHECK(reloaded.profiles[0].id == L"default");
+    CHECK(reloaded.profiles[1].id == L"SMenu");
+    const RingProfileConfig* loadedGaming = reloaded.FindProfile(L"gaming");
+    CHECK(loadedGaming != nullptr && loadedGaming->pinnedSlots.size() == 1);
+    CHECK(loadedGaming->pinnedSlots[0].pathOrUrl == L"https://store.steampowered.com");
+
+    // Deleting profile file removes it cleanly on next load
+    CHECK(SwitcherConfig::DeleteProfileFile(L"gaming", cfgPath));
+    SwitcherConfig afterDel;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, afterDel));
+    CHECK(afterDel.profiles.size() == 3);
+    CHECK(afterDel.FindProfile(L"gaming") == nullptr);
+
+    // Old SMenu.json Power order ([switch-user, shutdown, restart] + shutdown parent URL) upgrades automatically on load
+    RingProfileConfig legacySMenu = SwitcherConfig::CreateBuiltInSMenuProfile();
+    legacySMenu.pinnedSlots[3].pathOrUrl = L"winrings://power/shutdown";
+    std::swap(legacySMenu.pinnedSlots[3].items[0], legacySMenu.pinnedSlots[3].items[2]);
+    CHECK(legacySMenu.SaveToFile(SwitcherConfig::ProfileFilePath(L"SMenu", cfgPath)));
+    SwitcherConfig upgraded;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, upgraded));
+    const RingProfileConfig* upSMenu = upgraded.FindProfile(L"SMenu");
+    CHECK(upSMenu != nullptr && upSMenu->pinnedSlots[3].pathOrUrl.empty());
+    CHECK(upSMenu->pinnedSlots[3].items[0].id == L"smenu-restart");
+    CHECK(upSMenu->pinnedSlots[3].items[2].id == L"smenu-switch-user");
+
+    DeleteFileW((profDir + L"\\default.json").c_str());
+    DeleteFileW((profDir + L"\\SMenu.json").c_str());
+    DeleteFileW((profDir + L"\\work.json").c_str());
+    RemoveDirectoryW(profDir.c_str());
+    DeleteFileW((testDir + L"\\search.json").c_str());
+    DeleteFileW(cfgPath.c_str());
+    RemoveDirectoryW(testDir.c_str());
+}
+
+static void TestPointerGlideSafety()
+{
+    const RectD primaryMon{ 0.0, 0.0, 1920.0, 1080.0 };
+    const RectD primaryWork{ 0.0, 0.0, 1920.0, 1032.0 };
+    const RectD virtDesktop{ -1920.0, 0.0, 3840.0, 1080.0 };
+
+    // 1. Classic -32000 minimized bug: must NEVER resolve near (-32000,-32000) or (0,0)
+    const RectD iconicSentinel{ -32000.0, -32000.0, 160.0, 28.0 };
+    const RectD normalPos{ 400.0, 180.0, 900.0, 620.0 };
+    const RectD restored = ResolveRestoredWindowRect(
+        true, iconicSentinel, true, normalPos, false, primaryMon, primaryWork, primaryWork);
+    CHECK(restored.left >= 0.0 && restored.top >= 0.0);
+    const PointerGlidePlan restoredPlan = ComputeSafePointerGlideTarget(
+        { 100.0, 100.0 }, restored, primaryWork, virtDesktop);
+    CHECK(restoredPlan.shouldGlide);
+    CHECK(std::abs(restoredPlan.target.x - 850.0) < 0.1);
+    CHECK(std::abs(restoredPlan.target.y - 490.0) < 0.1);
+
+    // 2. Restored-to-maximized minimized window -> monitor work area center when cursor is on another monitor, no jump if already inside
+    const RectD maxRestored = ResolveRestoredWindowRect(
+        true, iconicSentinel, true, normalPos, true, primaryMon, primaryWork, primaryWork);
+    CHECK(!ComputeSafePointerGlideTarget({ 50.0, 50.0 }, maxRestored, primaryWork, virtDesktop).shouldGlide);
+    const PointerGlidePlan maxPlan = ComputeSafePointerGlideTarget(
+        { -300.0, 200.0 }, maxRestored, primaryWork, virtDesktop);
+    CHECK(maxPlan.shouldGlide);
+    CHECK(std::abs(maxPlan.target.x - 960.0) < 0.1);
+    CHECK(std::abs(maxPlan.target.y - 516.0) < 0.1);
+
+    // 3. Top taskbar workspace translation (workArea.top = 48)
+    const RectD topBarWork{ 0.0, 48.0, 1920.0, 1032.0 };
+    const RectD shifted = ResolveRestoredWindowRect(
+        true, iconicSentinel, true, RectD{ 200.0, 100.0, 600.0, 400.0 }, false,
+        primaryMon, topBarWork, topBarWork);
+    CHECK(std::abs(shifted.left - 200.0) < 0.1 && std::abs(shifted.top - 148.0) < 0.1);
+
+    // 4. Secondary monitor at negative X coordinates stays on secondary monitor
+    const RectD leftMonWork{ -1920.0, 0.0, 1920.0, 1040.0 };
+    const RectD leftWin{ -1500.0, 200.0, 800.0, 600.0 };
+    const PointerGlidePlan leftPlan = ComputeSafePointerGlideTarget(
+        { 300.0, 300.0 }, leftWin, leftMonWork, virtDesktop);
+    CHECK(leftPlan.shouldGlide);
+    CHECK(std::abs(leftPlan.target.x - (-1100.0)) < 0.1);
+    CHECK(std::abs(leftPlan.target.y - 500.0) < 0.1);
+
+    // 5. Cursor already inside visible window -> no glide
+    const PointerGlidePlan insidePlan = ComputeSafePointerGlideTarget(
+        { 700.0, 400.0 }, normalPos, primaryWork, virtDesktop);
+    CHECK(!insidePlan.shouldGlide);
+
+    // 6. Degenerate / tiny / offscreen window -> never glides to (0,0)
+    CHECK(!ComputeSafePointerGlideTarget({ 500.0, 500.0 }, RectD{ -32000.0, -32000.0, 160.0, 28.0 }, primaryWork, virtDesktop).shouldGlide);
+    CHECK(!ComputeSafePointerGlideTarget({ 500.0, 500.0 }, RectD{ 10.0, 10.0, 8.0, 8.0 }, primaryWork, virtDesktop).shouldGlide);
+    CHECK(!ComputeSafePointerGlideTarget({ 500.0, 500.0 }, RectD{ 2200.0, 100.0, 500.0, 400.0 }, primaryWork, virtDesktop).shouldGlide);
+
+    // 7. Partially offscreen window clamps glide to visible intersection center
+    const RectD partOff{ 1600.0, 700.0, 800.0, 600.0 }; // intersects primaryWork to [1600..1920, 700..1032]
+    const PointerGlidePlan partPlan = ComputeSafePointerGlideTarget(
+        { 200.0, 200.0 }, partOff, primaryWork, virtDesktop);
+    CHECK(partPlan.shouldGlide);
+    CHECK(partPlan.target.x >= 1600.0 && partPlan.target.x <= 1912.0);
+    CHECK(partPlan.target.y >= 700.0 && partPlan.target.y <= 1024.0);
+
+    // 8. User pointer override check avoids self-canceling SetCursorPos steps
+    CHECK(!IsUserPointerOverride({ 500.0, 500.0 }, { 480.0, 490.0 }, { 500.0, 500.0 }, 10.0));
+    CHECK(!IsUserPointerOverride({ 483.0, 492.0 }, { 480.0, 490.0 }, { 540.0, 540.0 }, 10.0));
+    CHECK(IsUserPointerOverride({ 650.0, 300.0 }, { 480.0, 490.0 }, { 500.0, 500.0 }, 10.0));
+}
+
 static void TestThemeMaterialEngine()
 {
+    // Default A4S native WCA material values must remain bit-calibrated
     SwitcherConfig a4s = SwitcherConfig::CreateDefault();
     const RingMaterialSpec mA4s = ComputeRingMaterial(a4s, 1.0);
+    CHECK(mA4s.surfaceTexture == SurfaceTexture::A4SAcrylic);
     CHECK(std::abs(mA4s.tintR - (32.0f / 255.0f)) < 0.002f);
     CHECK(std::abs(mA4s.tintAlpha - (128.0f / 255.0f)) < 0.002f);
     CHECK(std::abs(mA4s.blurSigma - 30.0f) < 0.05f);
@@ -592,20 +840,39 @@ static void TestThemeMaterialEngine()
     CHECK(mAcc.accentColorRef == RGB(0xFF, 0x55, 0x22));
     CHECK(std::abs(mAcc.hoverRevealColor.r - 1.0f) < 0.005f);
 
-    SwitcherConfig dw = a4s;
-    dw.theme = RingTheme::DarkWood;
-    dw.glassLevel = 86;
-    const RingMaterialSpec mDw = ComputeRingMaterial(dw, 1.0);
-    CHECK(mDw.tintAlpha > 0.80f);
-    CHECK(mDw.blurSigma < 3.0f);
+    // Texture 2: Genuine Win11 Taskbar Glass (wide blur, higher saturation, distinct from A4S)
+    SwitcherConfig taskbar = a4s;
+    taskbar.surfaceTexture = SurfaceTexture::TaskbarGlass;
+    const RingMaterialSpec mTaskbar = ComputeRingMaterial(taskbar, 1.0);
+    CHECK(mTaskbar.surfaceTexture == SurfaceTexture::TaskbarGlass);
+    CHECK(mTaskbar.blurSigma > 40.0f);
+    CHECK(mTaskbar.saturation > mA4s.saturation);
 
-    SwitcherConfig blue = a4s;
-    blue.theme = RingTheme::Blue;
-    blue.glassLevel = 45;
-    const RingMaterialSpec mBlue = ComputeRingMaterial(blue, 1.0);
-    CHECK(mBlue.tintB > mBlue.tintR);
-    CHECK(mBlue.accentColorRef == RGB(49, 134, 255));
-    CHECK(mBlue.blurSigma > 25.0f);
+    // Texture 3: Pure Matte (zero blur, zero noise)
+    SwitcherConfig matte = a4s;
+    matte.surfaceTexture = SurfaceTexture::PureMatte;
+    matte.glassLevel = 86;
+    const RingMaterialSpec mMatte = ComputeRingMaterial(matte, 1.0);
+    CHECK(mMatte.blurSigma == 0.0f);
+    CHECK(mMatte.noiseOpacity == 0.0f);
+    CHECK(mMatte.tintAlpha > 0.80f);
+
+    // Any texture + any custom surface color (e.g. Emerald Green & Light Alabaster)
+    SwitcherConfig greenGlass = taskbar;
+    greenGlass.useCustomSurfaceColor = true;
+    greenGlass.surfaceColor = L"#0F3B2E";
+    const RingMaterialSpec mGreen = ComputeRingMaterial(greenGlass, 1.0);
+    CHECK(mGreen.tintG > mGreen.tintR && mGreen.tintG > mGreen.tintB);
+    CHECK(mGreen.isLightText);
+    CHECK(mGreen.blurSigma > 40.0f);
+    CHECK(std::abs(mGreen.edgeBridgeColor.g - mGreen.tintG) < 0.01f);
+
+    SwitcherConfig lightCustom = matte;
+    lightCustom.useCustomSurfaceColor = true;
+    lightCustom.surfaceColor = L"#F3F3F3";
+    const RingMaterialSpec mLightCustom = ComputeRingMaterial(lightCustom, 1.0);
+    CHECK(!mLightCustom.isLightText);
+    CHECK(mLightCustom.textColor.r < 0.20f);
 
     const std::vector<uint8_t> noise = GenerateAcrylicNoiseBgra256();
     CHECK(noise.size() == 256u * 256u * 4u);
@@ -620,6 +887,113 @@ static void TestThemeMaterialEngine()
     }
     CHECK(premulOk);
     CHECK(maxLuma > minLuma + 80);
+}
+
+static void TestTriggerModelAndDeltaIpc()
+{
+    CHECK(NormalizeTriggerVk(VK_RWIN) == VK_LWIN);
+    CHECK(NormalizeTriggerVk(VK_LMENU) == VK_MENU);
+    CHECK(NormalizeTriggerVk(VK_RMENU) == VK_MENU);
+    CHECK(NormalizeTriggerVk(VK_LCONTROL) == VK_CONTROL);
+    CHECK(NormalizeTriggerVk(VK_RSHIFT) == VK_SHIFT);
+    CHECK(IsModifierVk(VK_RWIN) && IsModifierVk(VK_LMENU) && !IsModifierVk(VK_TAB));
+
+    TriggerBinding soloWin{ TriggerKind::SoloModifier, MouseTriggerButton::Disabled, 0, VK_LWIN, L"default" };
+    CHECK(FormatTriggerBinding(soloWin) == L"Win");
+    CHECK(AnalyzeTriggerConflict(soloWin).hasWarning);
+    CHECK(AnalyzeTriggerConflict(soloWin).summary.find(L"Start Menu") != std::wstring::npos);
+
+    TriggerBinding soloAlt{ TriggerKind::SoloModifier, MouseTriggerButton::Disabled, 0, VK_MENU, L"default" };
+    CHECK(FormatTriggerBinding(soloAlt) == L"Alt");
+    CHECK(AnalyzeTriggerConflict(soloAlt).hasWarning);
+
+    TriggerBinding altTab{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_ALT, VK_TAB, L"dev" };
+    CHECK(FormatTriggerBinding(altTab) == L"Alt + Tab");
+    CHECK(AnalyzeTriggerConflict(altTab).hasWarning);
+
+    TriggerBinding winTab{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, MOD_WIN, VK_TAB, L"default" };
+    CHECK(FormatTriggerBinding(winTab) == L"Win + Tab");
+    CHECK(AnalyzeTriggerConflict(winTab).hasWarning);
+
+    TriggerBinding rlChord{ TriggerKind::RightLeftChord, MouseTriggerButton::RightLeftChord, 0, 0, L"default" };
+    CHECK(FormatTriggerBinding(rlChord) == L"Right + Left Click");
+    CHECK(!AnalyzeTriggerConflict(rlChord).hasWarning);
+
+    // Surgical Delta IPC must mutate only its target section while preserving pinnedSlots
+    SwitcherConfig cfg = SwitcherConfig::CreateDefault();
+    const size_t initialPins = cfg.pinnedSlots.size();
+
+    SwitcherConfig lookSrc = cfg;
+    lookSrc.surfaceTexture = SurfaceTexture::TaskbarGlass;
+    lookSrc.useCustomSurfaceColor = true;
+    lookSrc.surfaceColor = L"#2A1B4E";
+    lookSrc.glassLevel = 72;
+    lookSrc.ringRadiusDip = 140.0;
+    CHECK(ApplyDeltaToConfig(cfg, MakeLookDelta(lookSrc)));
+    CHECK(cfg.surfaceTexture == SurfaceTexture::TaskbarGlass);
+    CHECK(cfg.useCustomSurfaceColor);
+    CHECK(cfg.surfaceColor == L"#2A1B4E");
+    CHECK(cfg.glassLevel == 72);
+    CHECK(std::abs(cfg.ringRadiusDip - 140.0) < 0.01);
+    CHECK(cfg.pinnedSlots.size() == initialPins);
+
+    SwitcherConfig trigSrc = cfg;
+    trigSrc.triggers = { soloWin, altTab, rlChord };
+    CHECK(ApplyDeltaToConfig(cfg, MakeTriggersDelta(trigSrc)));
+    CHECK(cfg.triggers.size() == 3);
+    CHECK(cfg.triggers[0].kind == TriggerKind::SoloModifier && cfg.triggers[0].vk == VK_LWIN);
+    CHECK(cfg.triggers[1].profileId == L"dev");
+    CHECK(cfg.interceptAltTab == true);
+    CHECK(cfg.mouseTrigger == MouseTriggerButton::RightLeftChord);
+
+    // Multi-trigger (>3) round-trip via Delta IPC (single non-modifier keys + multiple mouse buttons)
+    TriggerBinding keyF1{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, 0, VK_F1, L"default" };
+    TriggerBinding keyTilde{ TriggerKind::KeyChord, MouseTriggerButton::Disabled, 0, VK_OEM_3, L"default" };
+    TriggerBinding sideBack{ TriggerKind::MouseButton, MouseTriggerButton::SideBack, 0, 0, L"default" };
+    TriggerBinding sideFwd{ TriggerKind::MouseButton, MouseTriggerButton::SideForward, 0, 0, L"default" };
+    SwitcherConfig sixSrc = cfg;
+    sixSrc.triggers = { sideBack, sideFwd, soloWin, altTab, keyF1, keyTilde };
+    CHECK(ApplyDeltaToConfig(cfg, MakeTriggersDelta(sixSrc)));
+    CHECK(cfg.triggers.size() == 6);
+    CHECK(cfg.triggers[0].kind == TriggerKind::MouseButton && cfg.triggers[0].mouseButton == MouseTriggerButton::SideBack);
+    CHECK(cfg.triggers[1].kind == TriggerKind::MouseButton && cfg.triggers[1].mouseButton == MouseTriggerButton::SideForward);
+    CHECK(cfg.triggers[2].kind == TriggerKind::SoloModifier && cfg.triggers[2].vk == VK_LWIN);
+    CHECK(cfg.triggers[3].kind == TriggerKind::KeyChord && cfg.triggers[3].modifiers == MOD_ALT && cfg.triggers[3].vk == VK_TAB);
+    CHECK(cfg.triggers[4].kind == TriggerKind::KeyChord && cfg.triggers[4].modifiers == 0 && cfg.triggers[4].vk == VK_F1);
+    CHECK(cfg.triggers[5].kind == TriggerKind::KeyChord && cfg.triggers[5].modifiers == 0 && cfg.triggers[5].vk == VK_OEM_3);
+
+    SwitcherConfig gestSrc = cfg;
+    gestSrc.gestureTapOpenClose = false;
+    gestSrc.gestureHoldReleaseSwitch = true;
+    gestSrc.doubleTapLastApp = false;
+    gestSrc.pointerFollow = false;
+    CHECK(ApplyDeltaToConfig(cfg, MakeGesturesDelta(gestSrc)));
+    CHECK(!cfg.gestureTapOpenClose && cfg.gestureHoldReleaseSwitch);
+    CHECK(!cfg.doubleTapLastApp && !cfg.pointerFollow);
+    CHECK(cfg.pinnedSlots.size() == initialPins);
+
+    const WinRingsDeltaPacket openEdit = MakeOpenProfileForEditDelta(420, 360, L"SMenu");
+    CHECK(openEdit.op == DeltaOp::PreviewLiveRing && openEdit.intParam == 2u);
+    CHECK(openEdit.anchorScreenX == 420 && openEdit.anchorScreenY == 360);
+    CHECK(std::wstring(openEdit.previewProfileId) == L"SMenu");
+
+    // Native Windows (Win + ...) chords must always pass through when Win is held
+    for (UINT sysVk : { UINT('I'), UINT('R'), UINT('S'), UINT('D'), UINT('E'), UINT('X'), UINT('L'), UINT('V'),
+                        UINT('1'), UINT(VK_LEFT), UINT(VK_RIGHT), UINT(VK_UP), UINT(VK_DOWN),
+                        UINT(VK_TAB), UINT(VK_ESCAPE), UINT(VK_RETURN), UINT(VK_SPACE), UINT(VK_OEM_PERIOD), UINT(VK_OEM_MINUS) })
+    {
+        CHECK(ShouldPassThroughWinSystemChord(true, sysVk));
+        CHECK(!ShouldPassThroughWinSystemChord(false, sysVk));
+    }
+    for (UINT modVk : { UINT(VK_LWIN), UINT(VK_RWIN), UINT(VK_LSHIFT), UINT(VK_RSHIFT), UINT(VK_LCONTROL), UINT(VK_LMENU) })
+    {
+        CHECK(!ShouldPassThroughWinSystemChord(true, modVk));
+    }
+    CHECK(ResolveWinKeyHeld(true, false, -1.0, false));
+    CHECK(ResolveWinKeyHeld(false, false, -1.0, true));
+    CHECK(ResolveWinKeyHeld(false, true, 12.0, false));
+    CHECK(!ResolveWinKeyHeld(false, true, 250.0, false));
+    CHECK(!ResolveWinKeyHeld(false, false, -1.0, false));
 }
 
 static void TestSlotMatchingAndPreviews()
@@ -657,6 +1031,29 @@ static void TestSlotMatchingAndPreviews()
     CHECK(!ShouldShowSlotWindowPreview(SlotKind::Folder, 3, false));
     CHECK(!ShouldShowSlotWindowPreview(SlotKind::RecycleBin, 1, true));
     CHECK(!ShouldShowSlotWindowPreview(SlotKind::RecycleBin, 3, false));
+
+    // Control Panel & Settings matching helpers
+    CHECK(ExplorerWindowMatchesControlPanel(L"Control Panel"));
+    CHECK(ExplorerWindowMatchesControlPanel(L"All Control Panel Items - File Explorer"));
+    CHECK(!ExplorerWindowMatchesControlPanel(L"Downloads - File Explorer"));
+    CHECK(IsSystemSettingsExePath(L"C:\\Windows\\ImmersiveControlPanel\\SystemSettings.exe"));
+    CHECK(!IsSystemSettingsExePath(L"C:\\Windows\\notepad.exe"));
+
+    // Run as administrator eligibility & custom icon display formatting
+    CHECK(CanSlotToggleRunAsAdmin(SlotKind::App, L"C:\\Windows\\System32\\cmd.exe"));
+    CHECK(CanSlotToggleRunAsAdmin(SlotKind::Script, L"D:\\tools\\run.ps1"));
+    CHECK(CanSlotToggleRunAsAdmin(SlotKind::File, L"C:\\Windows\\System32\\eventvwr.msc"));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::App, L"winrings://power/shutdown"));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::File, L"ms-settings:about"));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::Website, L"https://example.com"));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::Folder, L"C:\\Users"));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::Collection, L""));
+    CHECK(!CanSlotToggleRunAsAdmin(SlotKind::RecycleBin, L""));
+
+    CHECK(FormatCustomIconDisplayName(L"") == L"Default icon");
+    CHECK(FormatCustomIconDisplayName(L"builtin:power") == L"Built-in icon");
+    CHECK(FormatCustomIconDisplayName(L"C:\\Icons\\handy.png") == L"handy.png");
+    CHECK(FormatCustomIconDisplayName(L"icons/example.ico") == L"example.ico");
 }
 
 static void TestDragSpringAndReorder()
@@ -688,6 +1085,13 @@ static void TestDragSpringAndReorder()
     CHECK(ComputeReorderTargetSlotIndex(-90.0, 0.0, 5, 8) == 4);   // 9 o'clock (slot 6) clamped to pinnedCount - 1 (4)
     CHECK(ComputeReorderTargetSlotIndex(90.0, 0.0, 1, 8) == 0);    // <=1 pinned -> 0
 
+    // Unpinned drag-to-pin target index (8 slots total, 5 pinned -> promotes into 0..5)
+    CHECK(ComputeUnpinnedDragTargetIndex(0.0, -90.0, 5, 8) == 0);   // 12 o'clock -> slot 0 (before first pinned)
+    CHECK(ComputeUnpinnedDragTargetIndex(0.0, 90.0, 5, 8) == 4);    // 6 o'clock -> slot 4
+    CHECK(ComputeUnpinnedDragTargetIndex(-90.0, 90.0, 5, 8) == 5);  // 7:30 o'clock (slot 5) -> end of pinned list (5)
+    CHECK(ComputeUnpinnedDragTargetIndex(-90.0, 0.0, 5, 8) == 5);   // 9 o'clock (slot 6) -> clamped to pinnedCount (5)
+    CHECK(ComputeUnpinnedDragTargetIndex(0.0, 90.0, 0, 8) == 0);    // 0 pinned -> promotes to slot 0
+
     // Reorder vector element forward, backward, and no-op
     std::vector<int> v1{ 10, 20, 30, 40, 50 };
     ReorderVectorElement(v1, 0, 3);
@@ -702,6 +1106,117 @@ static void TestDragSpringAndReorder()
     CHECK((v3 == std::vector<int>{ 10, 20, 30, 40, 50 }));
 }
 
+static void TestHiddenPinsSearchAndReorderMapping()
+{
+    // 1. Alias generation for portable app, website, and admin command (must NOT index parent directory names)
+    const auto handyAliases = BuildBasicSearchAliases(L"Handy", L"D:\\Portable\\Tools\\handy.exe");
+    CHECK(ScoreAliases(handyAliases, L"han") == 0);
+    CHECK(ScoreAliases(handyAliases, L"handy") == 0);
+    CHECK(ScoreAliases(handyAliases, L"portable") == -1);
+    CHECK(ScoreAliases(handyAliases, L"tools") == -1);
+
+    const auto siteAliases = BuildBasicSearchAliases(L"GitHub", L"https://www.github.com/org/repo");
+    CHECK(ScoreAliases(siteAliases, L"git") == 0);
+    CHECK(ScoreAliases(siteAliases, L"github.com") == 0);
+
+    const auto cmdAliases = BuildBasicSearchAliases(L"Admin Shell", L"C:\\Windows\\System32\\cmd.exe");
+    CHECK(ScoreAliases(cmdAliases, L"cmd") == 0);
+    CHECK(ScoreAliases(cmdAliases, L"as") == 2);
+
+    // Canonical keys normalize slashes, quotes, and trailing backslashes
+    CHECK(CanonicalSearchKey(L"\"D:/Portable/Handy/handy.exe\"") == L"d:\\portable\\handy\\handy.exe");
+    CHECK(CanonicalSearchKey(L"D:\\Portable\\Folder\\") == L"d:\\portable\\folder");
+    CHECK(CanonicalSearchKey(L"HTTPS://Example.COM/app") == L"https://example.com/app");
+
+    // 2. Source-priority tie-breaking & primary-vs-secondary alias scoring
+    CHECK(CompareSearchRankKey(SearchRankKey{ 0, 2, 4 }, SearchRankKey{ 1, 0, 10 })); // lower tier always wins
+    CHECK(CompareSearchRankKey(SearchRankKey{ 0, 0, 12 }, SearchRankKey{ 0, 1, 5 })); // Ring beats Hidden Pin on same tier
+    CHECK(CompareSearchRankKey(SearchRankKey{ 0, 1, 12 }, SearchRankKey{ 0, 2, 5 })); // Hidden Pin beats System on same tier
+    CHECK(CompareSearchRankKey(SearchRankKey{ 1, 1, 5 }, SearchRankKey{ 1, 1, 9 }));  // shorter name wins ties
+
+    const std::vector<std::wstring> downloadsPrimary{ L"Downloads" };
+    const std::vector<std::wstring> downloadsSecondary{ L"Handy-portable.zip", L"Handy - File Explorer" };
+    const std::vector<std::wstring> handyPrimary{ L"Handy", L"handy.exe" };
+    CHECK(ScoreSlotAliases(downloadsPrimary, downloadsSecondary, L"ha") == 4);
+    CHECK(ScoreSlotAliases(downloadsPrimary, downloadsSecondary, L"han") == 4);
+    CHECK(ScoreSlotAliases(handyPrimary, {}, L"ha") == 0);
+    CHECK(ScoreSlotAliases(handyPrimary, {}, L"han") == 0);
+    CHECK(CompareSearchRankKey(SearchRankKey{ 0, 1, 5 }, SearchRankKey{ 4, 0, 9 })); // Hidden Handy beats visible Downloads secondary match
+    CHECK(CompareSearchRankKey(SearchRankKey{ 0, 1, 5 }, SearchRankKey{ 3, 0, 5 })); // Hidden Handy prefix beats visible primary substring
+    CHECK(ScoreSlotAliases(downloadsPrimary, downloadsSecondary, L"portable") == 5);
+    CHECK(ScoreSlotAliases(downloadsPrimary, downloadsSecondary, L"nomatch") == -1);
+
+    // 3. Reorder index mapping with hidden pins + pointer search selection retention
+    const std::vector<bool> hiddenFlags{ false, true, false, true, false }; // visible indices 0->cfg 0, 1->cfg 2, 2->cfg 4
+    CHECK(MapVisiblePinnedIndexToConfigIndex(hiddenFlags, 0) == 0);
+    CHECK(MapVisiblePinnedIndexToConfigIndex(hiddenFlags, 1) == 2);
+    CHECK(MapVisiblePinnedIndexToConfigIndex(hiddenFlags, 2) == 4);
+    CHECK(MapVisiblePinnedIndexToConfigIndex(hiddenFlags, 3) == static_cast<size_t>(-1));
+    CHECK(MapVisiblePinnedInsertPosToConfigIndex(hiddenFlags, 0) == 0);
+    CHECK(MapVisiblePinnedInsertPosToConfigIndex(hiddenFlags, 1) == 2);
+    CHECK(MapVisiblePinnedInsertPosToConfigIndex(hiddenFlags, 2) == 4);
+    CHECK(MapVisiblePinnedInsertPosToConfigIndex(hiddenFlags, 3) == 5);
+    CHECK(ShouldKeepSearchSelectionOnPointer(-1, -1));
+    CHECK(!ShouldKeepSearchSelectionOnPointer(2, -1));
+    CHECK(!ShouldKeepSearchSelectionOnPointer(-1, 0));
+
+    // 4. Unified hiddenFromRing persistence inside profiles/*.json + one-time legacy search.json migration
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(_countof(tempDir), tempDir);
+    const std::wstring testDir = std::wstring(tempDir) + L"WinRingsSearchTest_" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring cfgPath = testDir + L"\\config.json";
+    const std::wstring profDir = testDir + L"\\profiles";
+    const std::wstring legacySearchPath = testDir + L"\\search.json";
+    CreateDirectoryW(testDir.c_str(), nullptr);
+
+    SwitcherConfig cfg = SwitcherConfig::CreateDefault();
+    PinnedSlotConfig handyPin{ L"pin-handy", SlotKind::App, L"Handy", L"D:\\Portable\\Handy\\handy.exe", L"C:\\Icons\\handy.png", 8, {}, true, L"--tray", true };
+    PinnedSlotConfig hiddenFolder{ L"pin-notes", SlotKind::Folder, L"Notes", L"D:\\Notes", L"", 6, {}, false, L"", true };
+    cfg.FindProfile(L"default")->pinnedSlots.push_back(handyPin);
+    cfg.FindProfile(L"SMenu")->pinnedSlots.push_back(hiddenFolder);
+    cfg.PullFromDefaultProfileMirror();
+    CHECK(cfg.SaveToFile(cfgPath));
+    CHECK(GetFileAttributesW(legacySearchPath.c_str()) == INVALID_FILE_ATTRIBUTES);
+
+    SwitcherConfig inlineRoundTrip;
+    CHECK(SwitcherConfig::ParseJsonUtf8(cfg.ToJsonUtf8(true), inlineRoundTrip));
+    CHECK(inlineRoundTrip.FindProfile(L"default")->pinnedSlots.back().hiddenFromRing);
+
+    SwitcherConfig loaded;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, loaded));
+    const RingProfileConfig* defLoaded = loaded.FindProfile(L"default");
+    const RingProfileConfig* smenuLoaded = loaded.FindProfile(L"SMenu");
+    CHECK(defLoaded != nullptr && defLoaded->pinnedSlots.back().id == L"pin-handy");
+    CHECK(defLoaded->pinnedSlots.back().hiddenFromRing == true);
+    CHECK(defLoaded->pinnedSlots.back().runAsAdmin == true);
+    CHECK(defLoaded->pinnedSlots.back().iconCacheFile == L"C:\\Icons\\handy.png");
+    CHECK(smenuLoaded != nullptr && smenuLoaded->pinnedSlots.back().id == L"pin-notes");
+    CHECK(smenuLoaded->pinnedSlots.back().hiddenFromRing == true);
+
+    // Legacy search.json migrates automatically into default profile with hiddenFromRing = true
+    const std::string legacyJson =
+        "{\"version\":1,\"items\":[{\"id\":\"srch-1\",\"kind\":\"Website\",\"label\":\"Docs\",\"pathOrUrl\":\"https://example.com/docs\",\"iconCacheFile\":\"\",\"maxFolderItems\":8,\"items\":[]}]}";
+    HANDLE hLegacy = CreateFileW(legacySearchPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(hLegacy != INVALID_HANDLE_VALUE);
+    if (hLegacy != INVALID_HANDLE_VALUE)
+    {
+        DWORD wr = 0;
+        WriteFile(hLegacy, legacyJson.data(), static_cast<DWORD>(legacyJson.size()), &wr, nullptr);
+        CloseHandle(hLegacy);
+    }
+    SwitcherConfig migrated;
+    CHECK(SwitcherConfig::LoadFromFile(cfgPath, migrated));
+    const auto& migratedPins = migrated.FindProfile(L"default")->pinnedSlots;
+    CHECK(migratedPins.back().label == L"Docs" && migratedPins.back().hiddenFromRing);
+
+    DeleteFileW((profDir + L"\\default.json").c_str());
+    DeleteFileW((profDir + L"\\SMenu.json").c_str());
+    RemoveDirectoryW(profDir.c_str());
+    DeleteFileW(legacySearchPath.c_str());
+    DeleteFileW(cfgPath.c_str());
+    RemoveDirectoryW(testDir.c_str());
+}
+
 int wmain()
 {
     TestRadialMath();
@@ -709,9 +1224,13 @@ int wmain()
     TestSearchScoring();
     TestCrashGuard();
     TestConfigRoundTrip();
+    TestPerProfileConfigFiles();
+    TestPointerGlideSafety();
     TestThemeMaterialEngine();
+    TestTriggerModelAndDeltaIpc();
     TestSlotMatchingAndPreviews();
     TestDragSpringAndReorder();
+    TestHiddenPinsSearchAndReorderMapping();
 
     if (g_failures == 0)
     {

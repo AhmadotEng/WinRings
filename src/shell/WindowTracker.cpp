@@ -2,6 +2,7 @@
 
 #include <Dwmapi.h>
 #include <Shellapi.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <cwctype>
 
@@ -104,6 +105,9 @@ namespace winrings
                 _wcsicmp(cls, L"Shell_SecondaryTrayWnd") == 0 ||
                 _wcsicmp(cls, L"Windows.UI.Core.CoreWindow") == 0 ||
                 _wcsicmp(cls, WINRINGS_OVERLAY_CLASS_W) == 0 ||
+                _wcsicmp(cls, L"WinRings.WcaBackdrop.v1") == 0 ||
+                _wcsicmp(cls, L"WinRings.TrayFlyout.v1") == 0 ||
+                _wcsicmp(cls, L"WinRings.ContextFlyout.v1") == 0 ||
                 _wcsicmp(cls, WINRINGS_THUMBCARD_CLASS_W) == 0 ||
                 _wcsicmp(cls, WINRINGS_HOST_WINDOW_CLASS_W) == 0 ||
                 _wcsicmp(cls, WINRINGS_SHELL_CONTROL_CLASS_W) == 0;
@@ -216,6 +220,56 @@ namespace winrings
         m_previousActiveWindow = m_lastActiveWindow;
         m_lastActiveWindow = activated;
         PromoteInMru(activated);
+    }
+
+    HWND WindowTracker::ResolvePreviousSwitchTarget(HWND ignoreOverlayHwnd) const
+    {
+        auto isValidTarget = [&](HWND h) -> bool {
+            if (!h || h == ignoreOverlayHwnd || !IsWindow(h) || !IsWindowVisible(h))
+                return false;
+            wchar_t cls[128]{};
+            GetClassNameW(h, cls, _countof(cls));
+            return !IsIgnoredShellClass(cls);
+        };
+
+        HWND current = GetForegroundWindow();
+        if (!isValidTarget(current))
+            current = m_lastActiveWindow;
+
+        if (isValidTarget(m_previousActiveWindow) && m_previousActiveWindow != current)
+            return m_previousActiveWindow;
+
+        for (HWND h : m_mruOrder)
+        {
+            if (isValidTarget(h) && h != current)
+                return h;
+        }
+
+        struct FindPrevCtx
+        {
+            HWND current = nullptr;
+            HWND ignore = nullptr;
+            HWND shell = nullptr;
+            HWND found = nullptr;
+        };
+        FindPrevCtx ctx{ current, ignoreOverlayHwnd, GetShellWindow(), nullptr };
+        EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* c = reinterpret_cast<FindPrevCtx*>(lp);
+            if (hwnd == c->current || hwnd == c->ignore)
+                return TRUE;
+            std::wstring title, exe;
+            DWORD pid = 0;
+            if (IsEligibleWindow(hwnd, c->shell, c->ignore, 0, title, pid, exe))
+            {
+                c->found = hwnd;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&ctx));
+
+        if (ctx.found)
+            return ctx.found;
+        return isValidTarget(m_lastActiveWindow) ? m_lastActiveWindow : nullptr;
     }
 
     void WindowTracker::PromoteInMru(HWND hwnd)
@@ -512,10 +566,12 @@ namespace winrings
 
     void WindowTracker::ActivateWindow(HWND target, bool centerOnActiveMonitor, bool pointerFollow)
     {
+        CancelPointerGlide();
         if (!target || !IsWindow(target))
             return;
 
-        if (IsIconic(target))
+        const bool wasIconic = IsIconic(target) != FALSE;
+        if (wasIconic)
             ShowWindow(target, SW_RESTORE);
 
         if (centerOnActiveMonitor)
@@ -539,21 +595,83 @@ namespace winrings
 
         if (pointerFollow && m_eventWindow)
         {
+            DWORD cloaked = 0;
+            const bool isCloaked = SUCCEEDED(DwmGetWindowAttribute(target, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0;
+            if (!IsWindowVisible(target) || target == GetShellWindow() || isCloaked)
+                return;
+
             POINT start{};
-            RECT rect{};
-            if (GetCursorPos(&start) && GetWindowRect(target, &rect))
+            if (!GetCursorPos(&start))
+                return;
+
+            RECT rawRect{};
+            if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS, &rawRect, sizeof(rawRect))))
             {
-                const bool alreadyInside = start.x >= rect.left && start.x <= rect.right &&
-                    start.y >= rect.top && start.y <= rect.bottom;
-                if (!alreadyInside)
-                {
-                    m_gliding = true;
-                    m_glideStart = start;
-                    m_glideLastExpected = start;
-                    m_glideTarget = { (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2 };
-                    m_glideStep = 0;
-                    SetTimer(m_eventWindow, kGlideTimerId, kGlideStepMs, nullptr);
-                }
+                if (!GetWindowRect(target, &rawRect))
+                    rawRect = {};
+            }
+
+            WINDOWPLACEMENT wp{ sizeof(wp) };
+            const bool hasWp = GetWindowPlacement(target, &wp) != FALSE;
+            const bool restoreMax = hasWp &&
+                (wp.showCmd == SW_SHOWMAXIMIZED || (wp.flags & WPF_RESTORETOMAXIMIZED) != 0);
+
+            HMONITOR targetMon = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO targetMi{ sizeof(targetMi) };
+            if (!GetMonitorInfoW(targetMon, &targetMi))
+                return;
+
+            HMONITOR primaryMon = MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+            MONITORINFO primaryMi{ sizeof(primaryMi) };
+            if (!GetMonitorInfoW(primaryMon, &primaryMi))
+                primaryMi = targetMi;
+
+            auto toRectD = [](const RECT& r) noexcept -> RectD {
+                return RectD{
+                    static_cast<double>(r.left),
+                    static_cast<double>(r.top),
+                    static_cast<double>(r.right - r.left),
+                    static_cast<double>(r.bottom - r.top)
+                };
+            };
+
+            const RectD virtDesktop{
+                static_cast<double>(GetSystemMetrics(SM_XVIRTUALSCREEN)),
+                static_cast<double>(GetSystemMetrics(SM_YVIRTUALSCREEN)),
+                static_cast<double>(GetSystemMetrics(SM_CXVIRTUALSCREEN)),
+                static_cast<double>(GetSystemMetrics(SM_CYVIRTUALSCREEN))
+            };
+            const RectD targetWork = toRectD(targetMi.rcWork);
+            const RectD normalWs = hasWp ? toRectD(wp.rcNormalPosition) : RectD{};
+            const RectD resolved = ResolveRestoredWindowRect(
+                wasIconic,
+                toRectD(rawRect),
+                hasWp,
+                normalWs,
+                restoreMax,
+                toRectD(primaryMi.rcMonitor),
+                toRectD(primaryMi.rcWork),
+                targetWork);
+
+            const PointerGlidePlan plan = ComputeSafePointerGlideTarget(
+                PointD{ static_cast<double>(start.x), static_cast<double>(start.y) },
+                resolved,
+                targetWork,
+                virtDesktop);
+
+            if (plan.shouldGlide)
+            {
+                m_gliding = true;
+                m_glideTargetHwnd = target;
+                m_glideStart = start;
+                m_glideLastExpected = start;
+                m_glideNextExpected = start;
+                m_glideTarget = {
+                    static_cast<LONG>(std::llround(plan.target.x)),
+                    static_cast<LONG>(std::llround(plan.target.y))
+                };
+                m_glideStep = 0;
+                SetTimer(m_eventWindow, kGlideTimerId, kGlideStepMs, nullptr);
             }
         }
     }
@@ -563,13 +681,31 @@ namespace winrings
         if (m_gliding && m_eventWindow)
             KillTimer(m_eventWindow, kGlideTimerId);
         m_gliding = false;
+        m_glideTargetHwnd = nullptr;
         m_glideStep = 0;
+    }
+
+    void WindowTracker::OnUserMouseMove(POINT screenPt) noexcept
+    {
+        if (!m_gliding)
+            return;
+        if (IsUserPointerOverride(
+            PointD{ static_cast<double>(screenPt.x), static_cast<double>(screenPt.y) },
+            PointD{ static_cast<double>(m_glideLastExpected.x), static_cast<double>(m_glideLastExpected.y) },
+            PointD{ static_cast<double>(m_glideNextExpected.x), static_cast<double>(m_glideNextExpected.y) },
+            10.0))
+        {
+            CancelPointerGlide();
+        }
     }
 
     void WindowTracker::OnGlideTimerTick() noexcept
     {
-        if (!m_gliding)
+        if (!m_gliding || !m_glideTargetHwnd || !IsWindow(m_glideTargetHwnd))
+        {
+            CancelPointerGlide();
             return;
+        }
 
         POINT cur{};
         if (!GetCursorPos(&cur))
@@ -577,7 +713,11 @@ namespace winrings
             CancelPointerGlide();
             return;
         }
-        if (std::abs(cur.x - m_glideLastExpected.x) > 6 || std::abs(cur.y - m_glideLastExpected.y) > 6)
+        if (IsUserPointerOverride(
+            PointD{ static_cast<double>(cur.x), static_cast<double>(cur.y) },
+            PointD{ static_cast<double>(m_glideLastExpected.x), static_cast<double>(m_glideLastExpected.y) },
+            PointD{ static_cast<double>(m_glideNextExpected.x), static_cast<double>(m_glideNextExpected.y) },
+            10.0))
         {
             CancelPointerGlide();
             return;
@@ -587,6 +727,7 @@ namespace winrings
         const double t = EaseOutCubic(static_cast<double>(m_glideStep) / static_cast<double>(kGlideTotalSteps));
         const int nextX = static_cast<int>(std::llround(m_glideStart.x + (m_glideTarget.x - m_glideStart.x) * t));
         const int nextY = static_cast<int>(std::llround(m_glideStart.y + (m_glideTarget.y - m_glideStart.y) * t));
+        m_glideNextExpected = { nextX, nextY };
         SetCursorPos(nextX, nextY);
         m_glideLastExpected = { nextX, nextY };
 
@@ -604,5 +745,110 @@ namespace winrings
     {
         if (hwnd && IsWindow(hwnd))
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+
+    void WindowTracker::EndTaskForWindows(const std::vector<WindowEntry>& windows) noexcept
+    {
+        if (windows.empty())
+            return;
+
+        const DWORD selfPid = GetCurrentProcessId();
+        DWORD selfSession = 0;
+        ProcessIdToSessionId(selfPid, &selfSession);
+
+        auto isProtectedExe = [](const std::wstring& exePath) -> bool {
+            if (exePath.empty())
+                return false;
+            const std::wstring fn = FileNameOf(exePath);
+            return _wcsicmp(fn.c_str(), L"explorer.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"csrss.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"dwm.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"winlogon.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"services.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"lsass.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"svchost.exe") == 0 ||
+                _wcsicmp(fn.c_str(), L"smss.exe") == 0;
+        };
+
+        std::vector<DWORD> targetPids;
+        std::vector<std::wstring> targetExePaths;
+        for (const auto& w : windows)
+        {
+            if (w.hwnd && IsWindow(w.hwnd))
+                PostMessageW(w.hwnd, WM_CLOSE, 0, 0);
+
+            DWORD pid = w.pid;
+            if (!pid && w.hwnd && IsWindow(w.hwnd))
+                GetWindowThreadProcessId(w.hwnd, &pid);
+            if (pid <= 4 || pid == selfPid)
+                continue;
+
+            std::wstring exe = TryGetProcessImagePath(pid);
+            if (!exe.empty() && _wcsicmp(FileNameOf(exe).c_str(), L"ApplicationFrameHost.exe") == 0 && w.hwnd)
+            {
+                UwpChildQuery q{ pid, 0 };
+                EnumChildWindows(w.hwnd, FindUwpChildProc, reinterpret_cast<LPARAM>(&q));
+                if (q.realPid > 4 && q.realPid != selfPid)
+                {
+                    pid = q.realPid;
+                    exe = TryGetProcessImagePath(pid);
+                }
+            }
+            if (pid <= 4 || pid == selfPid || isProtectedExe(exe))
+                continue;
+
+            if (std::find(targetPids.begin(), targetPids.end(), pid) == targetPids.end())
+                targetPids.push_back(pid);
+            if (!exe.empty())
+            {
+                const std::wstring low = ToLowerCopy(exe);
+                if (std::find(targetExePaths.begin(), targetExePaths.end(), low) == targetExePaths.end())
+                    targetExePaths.push_back(low);
+            }
+        }
+
+        if (targetPids.empty())
+            return;
+
+        // Give the app 100 ms to clean up on WM_CLOSE, then end the process & sibling workers
+        if (HANDLE hPrimary = OpenProcess(SYNCHRONIZE, FALSE, targetPids.front()))
+        {
+            WaitForSingleObject(hPrimary, 100);
+            CloseHandle(hPrimary);
+        }
+
+        // Also include any same-session processes sharing the exact executable path
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE)
+        {
+            PROCESSENTRY32W pe{ sizeof(pe) };
+            for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
+            {
+                if (pe.th32ProcessID <= 4 || pe.th32ProcessID == selfPid)
+                    continue;
+                DWORD sess = 0;
+                if (!ProcessIdToSessionId(pe.th32ProcessID, &sess) || sess != selfSession)
+                    continue;
+                const std::wstring exe = TryGetProcessImagePath(pe.th32ProcessID);
+                if (exe.empty() || isProtectedExe(exe))
+                    continue;
+                const std::wstring low = ToLowerCopy(exe);
+                if (std::find(targetExePaths.begin(), targetExePaths.end(), low) != targetExePaths.end() &&
+                    std::find(targetPids.begin(), targetPids.end(), pe.th32ProcessID) == targetPids.end())
+                {
+                    targetPids.push_back(pe.th32ProcessID);
+                }
+            }
+            CloseHandle(snap);
+        }
+
+        for (DWORD pid : targetPids)
+        {
+            if (HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid))
+            {
+                TerminateProcess(hProc, 1);
+                CloseHandle(hProc);
+            }
+        }
     }
 } // namespace winrings

@@ -665,4 +665,126 @@ namespace winrings
             return (step > 0) ? 0 : (count - 1);
         return (currentIndex + step + count) % count;
     }
+
+    struct PointerGlidePlan
+    {
+        bool shouldGlide = false;
+        PointD target{};
+    };
+
+    inline RectD IntersectRectD(RectD a, RectD b) noexcept
+    {
+        if (a.IsEmpty() || b.IsEmpty())
+            return {};
+        const double l = (std::max)(a.left, b.left);
+        const double t = (std::max)(a.top, b.top);
+        const double r = (std::min)(a.Right(), b.Right());
+        const double bt = (std::min)(a.Bottom(), b.Bottom());
+        if (r <= l || bt <= t)
+            return {};
+        return RectD{ l, t, r - l, bt - t };
+    }
+
+    /// Resolves a safe screen-space target rectangle for pointer glide, avoiding Win32
+    /// minimized (-32000, -32000) sentinel coordinates via WINDOWPLACEMENT workspace-to-screen
+    /// translation and falling back to the target monitor work area when restoring/offscreen.
+    inline RectD ResolveRestoredWindowRect(
+        bool isIconic,
+        RectD currentRect,
+        bool hasPlacement,
+        RectD normalWorkspaceRect,
+        bool restoreToMaximized,
+        RectD primaryMonitorRect,
+        RectD primaryWorkRect,
+        RectD targetMonitorWorkRect) noexcept
+    {
+        const bool currentValid = !isIconic && !currentRect.IsEmpty() &&
+            currentRect.width >= 16.0 && currentRect.height >= 16.0 &&
+            currentRect.left > -10000.0 && currentRect.top > -10000.0;
+        if (currentValid)
+        {
+            const RectD onMonitor = IntersectRectD(currentRect, targetMonitorWorkRect);
+            if (!onMonitor.IsEmpty() && onMonitor.width >= 16.0 && onMonitor.height >= 16.0)
+                return currentRect;
+        }
+
+        if (restoreToMaximized && !targetMonitorWorkRect.IsEmpty())
+            return targetMonitorWorkRect;
+
+        if (hasPlacement && !normalWorkspaceRect.IsEmpty() &&
+            normalWorkspaceRect.width >= 16.0 && normalWorkspaceRect.height >= 16.0 &&
+            normalWorkspaceRect.left > -10000.0 && normalWorkspaceRect.top > -10000.0)
+        {
+            const double dx = primaryWorkRect.left - primaryMonitorRect.left;
+            const double dy = primaryWorkRect.top - primaryMonitorRect.top;
+            const RectD translated{
+                normalWorkspaceRect.left + dx,
+                normalWorkspaceRect.top + dy,
+                normalWorkspaceRect.width,
+                normalWorkspaceRect.height
+            };
+            const RectD vis = IntersectRectD(translated, targetMonitorWorkRect);
+            if (!vis.IsEmpty() && vis.width >= 16.0 && vis.height >= 16.0)
+                return translated;
+        }
+
+        if (!targetMonitorWorkRect.IsEmpty() && targetMonitorWorkRect.width >= 16.0 && targetMonitorWorkRect.height >= 16.0)
+            return targetMonitorWorkRect;
+
+        return currentValid ? currentRect : RectD{};
+    }
+
+    /// Computes a safe pointer glide target strictly within the visible portion of the target
+    /// window and its monitor work area, returning shouldGlide=false if the cursor is already
+    /// inside the window or the rect is invalid/offscreen/tiny.
+    inline PointerGlidePlan ComputeSafePointerGlideTarget(
+        PointD cursorPt,
+        RectD windowRect,
+        RectD monitorWorkRect,
+        RectD virtualScreenRect) noexcept
+    {
+        PointerGlidePlan plan{};
+        if (windowRect.IsEmpty() || windowRect.width < 16.0 || windowRect.height < 16.0 ||
+            windowRect.left <= -10000.0 || windowRect.top <= -10000.0)
+        {
+            return plan;
+        }
+
+        RectD vis = windowRect;
+        if (!monitorWorkRect.IsEmpty())
+            vis = IntersectRectD(vis, monitorWorkRect);
+        if (!virtualScreenRect.IsEmpty())
+            vis = IntersectRectD(vis, virtualScreenRect);
+
+        if (vis.IsEmpty() || vis.width < 16.0 || vis.height < 16.0)
+            return plan;
+
+        if (vis.Contains(cursorPt))
+            return plan;
+
+        double tx = vis.left + vis.width * 0.5;
+        double ty = vis.top + vis.height * 0.5;
+        if (!monitorWorkRect.IsEmpty() && monitorWorkRect.width > 16.0 && monitorWorkRect.height > 16.0)
+        {
+            tx = std::clamp(tx, monitorWorkRect.left + 8.0, monitorWorkRect.Right() - 8.0);
+            ty = std::clamp(ty, monitorWorkRect.top + 8.0, monitorWorkRect.Bottom() - 8.0);
+        }
+
+        plan.shouldGlide = true;
+        plan.target = { tx, ty };
+        return plan;
+    }
+
+    /// Returns true when the physical cursor position has diverged from both the previous and
+    /// upcoming synthetic glide positions, indicating deliberate user mouse movement.
+    inline bool IsUserPointerOverride(
+        PointD currentCursor,
+        PointD lastExpected,
+        PointD nextExpected,
+        double tolerancePx = 10.0) noexcept
+    {
+        const double dLast = std::hypot(currentCursor.x - lastExpected.x, currentCursor.y - lastExpected.y);
+        const double dNext = std::hypot(currentCursor.x - nextExpected.x, currentCursor.y - nextExpected.y);
+        return (dLast > tolerancePx) && (dNext > tolerancePx);
+    }
 } // namespace winrings

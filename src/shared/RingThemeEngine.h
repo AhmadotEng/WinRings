@@ -14,7 +14,9 @@ namespace winrings
 {
     struct RingMaterialSpec
     {
-        // Live HostBackdrop + D2D1 effect graph recipe (used identically by AcrylicBackdrop and Settings Preview)
+        SurfaceTexture surfaceTexture = SurfaceTexture::A4SAcrylic;
+
+        // Live HostBackdrop + D2D1 effect graph recipe (used by AcrylicBackdrop)
         float blurSigma = 30.0f;
         float saturation = 1.15f;
         float luminosityR = 38.0f / 255.0f;
@@ -47,6 +49,15 @@ namespace winrings
         D2D1_COLOR_F mutedTextColor{};
         D2D1_COLOR_F idleDotColor{};
 
+        // 3D Glass bezel & WCA edge-bridge stops
+        D2D1_COLOR_F edgeBridgeColor{};
+        D2D1_COLOR_F outerBezelTop{};
+        D2D1_COLOR_F outerBezelMid{};
+        D2D1_COLOR_F outerBezelBot{};
+        D2D1_COLOR_F innerBezelTop{};
+        D2D1_COLOR_F innerBezelMid{};
+        D2D1_COLOR_F innerBezelBot{};
+
         float ringStrokeWidth = 0.85f;
         float hairlineWidth = 0.85f;
         bool isLightText = true;
@@ -71,13 +82,18 @@ namespace winrings
             return static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(LerpFloat(a, b, x))), 0, 255));
         }
 
-        inline void ParseAccentHex(const std::wstring& hex, BYTE& r, BYTE& g, BYTE& b) noexcept
+        inline BYTE ClampByte(float v) noexcept
         {
-            r = 0;
-            g = 120;
-            b = 212;
+            return static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(v)), 0, 255));
+        }
+
+        inline bool ParseHexColor(const std::wstring& hex, BYTE& r, BYTE& g, BYTE& b, BYTE defR, BYTE defG, BYTE defB) noexcept
+        {
+            r = defR;
+            g = defG;
+            b = defB;
             if (hex.empty())
-                return;
+                return false;
             const wchar_t* p = (hex[0] == L'#') ? (hex.c_str() + 1) : hex.c_str();
             const size_t len = wcslen(p);
             unsigned int val = 0;
@@ -87,7 +103,14 @@ namespace winrings
                 r = static_cast<BYTE>((val >> 16) & 0xFF);
                 g = static_cast<BYTE>((val >> 8) & 0xFF);
                 b = static_cast<BYTE>(val & 0xFF);
+                return true;
             }
+            return false;
+        }
+
+        inline void ParseAccentHex(const std::wstring& hex, BYTE& r, BYTE& g, BYTE& b) noexcept
+        {
+            ParseHexColor(hex, r, g, b, 0, 120, 212);
         }
     } // namespace detail
 
@@ -101,128 +124,155 @@ namespace winrings
         const bool isDefaultAccent = (accR == 0 && accG == 120 && accB == 212);
 
         RingMaterialSpec m{};
-        m.isLightText = (t < 0.52f);
+        m.surfaceTexture = cfg.surfaceTexture;
 
         const float safeDpiScale = static_cast<float>((std::max)(1.0, dpiScale));
         const float hairlineDip = (std::min)(0.85f, 1.0f / safeDpiScale);
         m.ringStrokeWidth = hairlineDip;
         m.hairlineWidth = hairlineDip;
 
-        if (cfg.theme == RingTheme::Blue)
+        // 1. Base surface color (completely decoupled from texture!)
+        float baseR = 32.0f, baseG = 32.0f, baseB = 32.0f;
+        if (cfg.useCustomSurfaceColor)
         {
-            const float tr = detail::LerpFloat(20.0f, 220.0f, t);
-            const float tg = detail::LerpFloat(42.0f, 236.0f, t);
-            const float tb = detail::LerpFloat(82.0f, 255.0f, t);
-            m.tintR = tr / 255.0f;
-            m.tintG = tg / 255.0f;
-            m.tintB = tb / 255.0f;
-            m.tintAlpha = (g <= 0.45f)
-                ? detail::LerpFloat(0.10f, 0.48f, g / 0.45f)
-                : detail::LerpFloat(0.48f, 0.94f, (g - 0.45f) / 0.55f);
-
-            m.blurSigma = (g <= 0.45f)
-                ? detail::LerpFloat(16.0f, 28.0f, g / 0.45f)
-                : (std::max)(0.0f, 28.0f * (1.0f - std::pow((g - 0.45f) / 0.55f, 1.5f)));
-            m.saturation = detail::LerpFloat(1.36f, 1.06f, g);
-            m.luminosityR = detail::LerpFloat(26.0f, 228.0f, t) / 255.0f;
-            m.luminosityG = detail::LerpFloat(50.0f, 240.0f, t) / 255.0f;
-            m.luminosityB = detail::LerpFloat(96.0f, 255.0f, t) / 255.0f;
-            m.luminosityAlpha = (g <= 0.45f)
-                ? detail::LerpFloat(0.20f, 0.72f, g / 0.45f)
-                : detail::LerpFloat(0.72f, 0.0f, (g - 0.45f) / 0.55f);
-            m.noiseOpacity = (g <= 0.45f)
-                ? detail::LerpFloat(0.008f, 0.012f, g / 0.45f)
-                : detail::LerpFloat(0.012f, 0.0f, (g - 0.45f) / 0.55f);
-
-            const BYTE blueR = isDefaultAccent ? 49 : accR;
-            const BYTE blueG = isDefaultAccent ? 134 : accG;
-            const BYTE blueB = isDefaultAccent ? 255 : accB;
-            m.accent = detail::RgbaF(255, blueR, blueG, blueB);
-            m.hoverRevealColor = m.accent;
-            m.accentColorRef = RGB(blueR, blueG, blueB);
-
-            const BYTE rimR = detail::LerpByteVal(72.0f, 36.0f, t);
-            const BYTE rimG = detail::LerpByteVal(148.0f, 116.0f, t);
-            const BYTE rimB = 255;
-            m.ringStroke = detail::RgbaF(185, rimR, rimG, rimB);
-            m.innerRimStroke = detail::RgbaF(125, rimR, rimG, rimB);
-            m.borderColorRef = RGB(rimR, rimG, rimB);
-            m.centerBorder = detail::RgbaF(175, rimR, rimG, rimB);
-            m.searchBorder = detail::RgbaF(185, detail::LerpByteVal(72.0f, 49.0f, t), detail::LerpByteVal(148.0f, 134.0f, t), 255);
-            m.slotSelectedFill = detail::RgbaF(68, blueR, blueG, blueB);
-            m.hoverRim = detail::RgbaF(210, 96, 165, 250);
-            m.sectorStroke = detail::RgbaF(225, blueR, blueG, blueB);
+            BYTE sr = 32, sg = 32, sb = 32;
+            detail::ParseHexColor(cfg.surfaceColor, sr, sg, sb, 32, 32, 32);
+            baseR = detail::LerpFloat(static_cast<float>(sr), 242.0f, t * 0.82f);
+            baseG = detail::LerpFloat(static_cast<float>(sg), 242.0f, t * 0.82f);
+            baseB = detail::LerpFloat(static_cast<float>(sb), 242.0f, t * 0.82f);
+            const float luma = 0.2126f * baseR + 0.7152f * baseG + 0.0722f * baseB;
+            m.isLightText = (luma < 142.0f);
         }
-        else if (cfg.theme == RingTheme::DarkWood)
+        else if (cfg.surfaceTexture == SurfaceTexture::TaskbarGlass)
         {
-            const float tr = detail::LerpFloat(32.0f, 238.0f, t);
-            const float tg = detail::LerpFloat(32.0f, 236.0f, t);
-            const float tb = detail::LerpFloat(32.0f, 232.0f, t);
-            m.tintR = tr / 255.0f;
-            m.tintG = tg / 255.0f;
-            m.tintB = tb / 255.0f;
-            m.tintAlpha = 0.08f + g * 0.88f;
+            baseR = detail::LerpFloat(28.0f, 240.0f, t);
+            baseG = detail::LerpFloat(30.0f, 243.0f, t);
+            baseB = detail::LerpFloat(34.0f, 248.0f, t);
+            m.isLightText = (t < 0.52f);
+        }
+        else
+        {
+            const float v = detail::LerpFloat(32.0f, 243.0f, t);
+            baseR = v;
+            baseG = v;
+            baseB = v;
+            m.isLightText = (t < 0.52f);
+        }
 
-            m.blurSigma = (std::max)(0.0f, (1.0f - g) * 14.0f);
-            m.saturation = 1.02f;
+        m.tintR = baseR / 255.0f;
+        m.tintG = baseG / 255.0f;
+        m.tintB = baseB / 255.0f;
+
+        // 2. Genuine per-texture optical parameters
+        if (cfg.surfaceTexture == SurfaceTexture::TaskbarGlass)
+        {
+            // Windows 11 Taskbar / HostBackdrop recipe: wide blur, vibrant wallpaper bleed, deep luminosity wash
+            m.tintAlpha = 0.12f + g * 0.76f;
+            m.blurSigma = (g <= 0.70f)
+                ? detail::LerpFloat(28.0f, 54.0f, g / 0.70f)
+                : (std::max)(0.0f, 54.0f * (1.0f - std::pow((g - 0.70f) / 0.30f, 1.4f)));
+            m.saturation = detail::LerpFloat(1.38f, 1.12f, g);
+            m.luminosityR = (std::min)(255.0f, baseR + 8.0f) / 255.0f;
+            m.luminosityG = (std::min)(255.0f, baseG + 8.0f) / 255.0f;
+            m.luminosityB = (std::min)(255.0f, baseB + 10.0f) / 255.0f;
+            m.luminosityAlpha = (g <= 0.70f)
+                ? detail::LerpFloat(0.35f, 0.84f, g / 0.70f)
+                : detail::LerpFloat(0.84f, 0.0f, (g - 0.70f) / 0.30f);
+            m.noiseOpacity = (1.0f - g * 0.5f) * 0.010f;
+        }
+        else if (cfg.surfaceTexture == SurfaceTexture::PureMatte)
+        {
+            // Pure Matte Tint: zero blur, zero noise, clean controllable opacity
+            m.tintAlpha = 0.14f + g * 0.84f;
+            m.blurSigma = 0.0f;
+            m.saturation = 1.00f;
             m.luminosityR = m.tintR;
             m.luminosityG = m.tintG;
             m.luminosityB = m.tintB;
-            m.luminosityAlpha = (std::max)(0.0f, (1.0f - g) * 0.45f);
-            m.noiseOpacity = (std::max)(0.0f, (1.0f - g) * 0.010f);
-
-            m.accent = detail::RgbaF(255, accR, accG, accB);
-            m.hoverRevealColor = m.accent;
-            m.accentColorRef = RGB(accR, accG, accB);
-
-            const BYTE rimV = detail::LerpByteVal(78.0f, 154.0f, t);
-            m.ringStroke = detail::RgbaF(static_cast<BYTE>(150 + g * 45), rimV, rimV, rimV);
-            m.innerRimStroke = detail::RgbaF(110, rimV, rimV, rimV);
-            m.borderColorRef = RGB(rimV, rimV, rimV);
-            m.centerBorder = detail::RgbaF(170, rimV, rimV, rimV);
-            const BYTE srV = detail::LerpByteVal(90.0f, 168.0f, t);
-            m.searchBorder = detail::RgbaF(185, srV, srV, static_cast<BYTE>((std::min)(255, static_cast<int>(srV) + 4)));
-            m.slotSelectedFill = m.isLightText ? detail::RgbaF(44, 255, 255, 255) : detail::RgbaF(30, 0, 0, 0);
-            m.hoverRim = detail::RgbaF(200, accR, accG, accB);
-            m.sectorStroke = detail::RgbaF(255, accR, accG, accB);
+            m.luminosityAlpha = 0.0f;
+            m.noiseOpacity = 0.0f;
         }
-        else // RingTheme::A4S (Default — A4S-Menu / Windows 11 ACCENT_ENABLE_ACRYLICBLURBEHIND calibrated 1:1)
+        else // SurfaceTexture::A4SAcrylic (Default — calibrated 1:1 to Windows 11 WCA ACCENT_ENABLE_ACRYLICBLURBEHIND)
         {
-            // A4SMenuProfile.cpp:213, 301: RGB(32,32,32) tint, BackdropAlpha = 128 (~0.502) at glassLevel = 50.
-            // Empirically calibrated against live A4S-Menu (WCA state=4 flags=0x13 0x80202020) across black,
-            // dark IDE, purple/blue wallpapers, and bright white icons:
-            //   luminosity RGB(38,38,38) @ 0.90 + tint RGB(32,32,32) @ 128/255 + 30px Gaussian blur + ultra-fine grain.
-            const float tv = detail::LerpFloat(32.0f, 243.0f, t) / 255.0f;
-            m.tintR = tv;
-            m.tintG = tv;
-            m.tintB = tv;
             m.tintAlpha = (g <= 0.5f)
                 ? detail::LerpFloat(0.08f, 128.0f / 255.0f, g / 0.5f)
                 : detail::LerpFloat(128.0f / 255.0f, 0.96f, (g - 0.5f) / 0.5f);
-
             m.blurSigma = (g <= 0.5f)
                 ? detail::LerpFloat(18.0f, 30.0f, g / 0.5f)
                 : (std::max)(0.0f, 30.0f * (1.0f - std::pow((g - 0.5f) / 0.5f, 1.5f)));
             m.saturation = detail::LerpFloat(1.30f, 1.00f, g);
 
-            const float lv = detail::LerpFloat(38.0f, 246.0f, t) / 255.0f;
-            m.luminosityR = lv;
-            m.luminosityG = lv;
-            m.luminosityB = lv;
+            if (cfg.useCustomSurfaceColor)
+            {
+                m.luminosityR = (std::min)(255.0f, baseR + 6.0f) / 255.0f;
+                m.luminosityG = (std::min)(255.0f, baseG + 6.0f) / 255.0f;
+                m.luminosityB = (std::min)(255.0f, baseB + 6.0f) / 255.0f;
+            }
+            else
+            {
+                const float lv = detail::LerpFloat(38.0f, 246.0f, t) / 255.0f;
+                m.luminosityR = lv;
+                m.luminosityG = lv;
+                m.luminosityB = lv;
+            }
             const float peakLumA = detail::LerpFloat(0.90f, 0.88f, t);
             m.luminosityAlpha = (g <= 0.5f)
                 ? detail::LerpFloat(0.24f, peakLumA, g / 0.5f)
                 : detail::LerpFloat(peakLumA, 0.0f, (g - 0.5f) / 0.5f);
-
             m.noiseOpacity = (g <= 0.5f)
                 ? detail::LerpFloat(0.008f, 0.012f, g / 0.5f)
                 : detail::LerpFloat(0.012f, 0.0f, (g - 0.5f) / 0.5f);
+        }
 
-            m.accent = detail::RgbaF(255, accR, accG, accB);
-            m.hoverRevealColor = isDefaultAccent ? detail::RgbaF(255, 52, 99, 141) : m.accent;
-            m.accentColorRef = RGB(accR, accG, accB);
+        // 3. Accent, strokes, and 3D glass bezel tokens
+        m.accent = detail::RgbaF(255, accR, accG, accB);
+        m.hoverRevealColor = (isDefaultAccent && !cfg.useCustomSurfaceColor && cfg.surfaceTexture == SurfaceTexture::A4SAcrylic)
+            ? detail::RgbaF(255, 52, 99, 141)
+            : m.accent;
+        m.accentColorRef = RGB(accR, accG, accB);
 
-            // MenuContainer.cpp:112 (#3E3E3E = RGB(62,62,62) outer border), MenuPaint.cpp:151 (RGB(81,81,81) search box)
+        if (cfg.useCustomSurfaceColor)
+        {
+            const float rimShift = m.isLightText ? 54.0f : -56.0f;
+            const BYTE rimR = detail::ClampByte(baseR + rimShift);
+            const BYTE rimG = detail::ClampByte(baseG + rimShift);
+            const BYTE rimB = detail::ClampByte(baseB + rimShift);
+            m.ringStroke = detail::RgbaF(185, rimR, rimG, rimB);
+            m.innerRimStroke = detail::RgbaF(130, rimR, rimG, rimB);
+            m.borderColorRef = RGB(rimR, rimG, rimB);
+            m.centerBorder = detail::RgbaF(175, rimR, rimG, rimB);
+            m.searchBorder = detail::RgbaF(185, rimR, rimG, rimB);
+
+            m.slotSelectedFill = m.isLightText ? detail::RgbaF(46, 255, 255, 255) : detail::RgbaF(30, 0, 0, 0);
+            m.hoverRim = m.isLightText ? detail::RgbaF(110, 255, 255, 255) : detail::RgbaF(75, 0, 0, 0);
+            m.sectorStroke = detail::RgbaF(230, accR, accG, accB);
+
+            m.edgeBridgeColor = D2D1_COLOR_F{ m.tintR, m.tintG, m.tintB, 0.90f };
+            if (m.isLightText)
+            {
+                const float hiR = (std::min)(1.0f, m.tintR * 0.5f + 0.5f);
+                const float hiG = (std::min)(1.0f, m.tintG * 0.5f + 0.5f);
+                const float hiB = (std::min)(1.0f, m.tintB * 0.5f + 0.5f);
+                m.outerBezelTop = D2D1_COLOR_F{ hiR, hiG, hiB, 0.44f };
+                m.outerBezelMid = m.ringStroke;
+                m.outerBezelBot = D2D1_COLOR_F{ m.tintR, m.tintG, m.tintB, 0.22f };
+                m.innerBezelTop = D2D1_COLOR_F{ m.tintR, m.tintG, m.tintB, 0.16f };
+                m.innerBezelMid = m.innerRimStroke;
+                m.innerBezelBot = D2D1_COLOR_F{ hiR, hiG, hiB, 0.34f };
+            }
+            else
+            {
+                m.outerBezelTop = D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.85f };
+                m.outerBezelMid = m.ringStroke;
+                m.outerBezelBot = D2D1_COLOR_F{ rimR / 255.0f, rimG / 255.0f, rimB / 255.0f, 0.45f };
+                m.innerBezelTop = D2D1_COLOR_F{ rimR / 255.0f, rimG / 255.0f, rimB / 255.0f, 0.36f };
+                m.innerBezelMid = m.innerRimStroke;
+                m.innerBezelBot = D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.72f };
+            }
+        }
+        else
+        {
+            // Approved A4S neutral dark/light strokes & 3D glass rims
             const BYTE rimV = detail::LerpByteVal(62.0f, 184.0f, t);
             const BYTE rimB = detail::LerpByteVal(62.0f, 190.0f, t);
             m.ringStroke = detail::RgbaF(185, rimV, rimV, rimB);
@@ -234,16 +284,39 @@ namespace winrings
             const BYTE sbB = detail::LerpByteVal(81.0f, 172.0f, t);
             m.searchBorder = detail::RgbaF(185, sbV, sbV, sbB);
 
-            // MenuPaint.cpp:241 (overlayAlpha = 37)
             m.slotSelectedFill = m.isLightText ? detail::RgbaF(37, 255, 255, 255) : detail::RgbaF(26, 0, 0, 0);
             m.hoverRim = m.isLightText ? detail::RgbaF(85, 255, 255, 255) : detail::RgbaF(55, 0, 0, 0);
             m.sectorStroke = detail::RgbaF(220, accR, accG, accB);
+
+            m.edgeBridgeColor = m.isLightText
+                ? D2D1_COLOR_F{ 34.0f / 255.0f, 34.0f / 255.0f, 36.0f / 255.0f, 0.90f }
+                : D2D1_COLOR_F{ 236.0f / 255.0f, 236.0f / 255.0f, 240.0f / 255.0f, 0.90f };
+
+            m.outerBezelTop = m.isLightText
+                ? D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.25f }
+                : D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.85f };
+            m.outerBezelMid = m.isLightText
+                ? D2D1_COLOR_F{ 118.0f / 255.0f, 118.0f / 255.0f, 124.0f / 255.0f, 0.42f }
+                : D2D1_COLOR_F{ 170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.55f };
+            m.outerBezelBot = m.isLightText
+                ? D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.09f }
+                : D2D1_COLOR_F{ 120.0f / 255.0f, 126.0f / 255.0f, 138.0f / 255.0f, 0.42f };
+
+            m.innerBezelTop = m.isLightText
+                ? D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.07f }
+                : D2D1_COLOR_F{ 110.0f / 255.0f, 116.0f / 255.0f, 126.0f / 255.0f, 0.34f };
+            m.innerBezelMid = m.isLightText
+                ? D2D1_COLOR_F{ 108.0f / 255.0f, 108.0f / 255.0f, 114.0f / 255.0f, 0.32f }
+                : D2D1_COLOR_F{ 170.0f / 255.0f, 174.0f / 255.0f, 182.0f / 255.0f, 0.45f };
+            m.innerBezelBot = m.isLightText
+                ? D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.20f }
+                : D2D1_COLOR_F{ 1.0f, 1.0f, 1.0f, 0.72f };
         }
 
-        const BYTE fillR = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(m.tintR * 255.0f)), 0, 255));
-        const BYTE fillG = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(m.tintG * 255.0f)), 0, 255));
-        const BYTE fillB = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(m.tintB * 255.0f)), 0, 255));
-        const BYTE fillA = static_cast<BYTE>(std::clamp(static_cast<int>(std::lround(m.tintAlpha * 255.0f)), 0, 255));
+        const BYTE fillR = detail::ClampByte(m.tintR * 255.0f);
+        const BYTE fillG = detail::ClampByte(m.tintG * 255.0f);
+        const BYTE fillB = detail::ClampByte(m.tintB * 255.0f);
+        const BYTE fillA = detail::ClampByte(m.tintAlpha * 255.0f);
         const BYTE centerA = static_cast<BYTE>((std::min)(246, static_cast<int>(fillA) + 28));
 
         m.ringFill = detail::RgbaF(fillA, fillR, fillG, fillB);
@@ -271,7 +344,6 @@ namespace winrings
 
         for (int i = 0; i < kSize * kSize; ++i)
         {
-            // Fast 32-bit xorshift/splitmix-style PRNG; triangular distribution avoids harsh salt-and-pepper grit.
             state ^= state << 13;
             state ^= state >> 17;
             state ^= state << 5;

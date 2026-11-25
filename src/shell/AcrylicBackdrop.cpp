@@ -341,7 +341,10 @@ namespace winrings
         try
         {
             if (m_impl->target)
+            {
                 m_impl->target.Root(nullptr);
+                m_impl->target.Close();
+            }
             if (m_impl->maskBrush)
             {
                 m_impl->maskBrush.Source(nullptr);

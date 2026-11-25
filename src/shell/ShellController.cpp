@@ -16,6 +16,7 @@
 
 #include "../shared/WinRingsApi.h"
 #include "../shared/WinRingsConfig.h"
+#include "../shared/WinRingsDeltaIpc.h"
 #include "../shared/WinRingsIdentity.h"
 #include "AppIndex.h"
 #include "InputEngine.h"
@@ -170,6 +171,15 @@ namespace winrings
 
             int Run()
             {
+                if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+                {
+                    using SetThreadDpiCtxFn = DPI_AWARENESS_CONTEXT (WINAPI*)(DPI_AWARENESS_CONTEXT);
+                    if (auto fn = reinterpret_cast<SetThreadDpiCtxFn>(
+                        GetProcAddress(user32, "SetThreadDpiAwarenessContext")))
+                    {
+                        fn(reinterpret_cast<DPI_AWARENESS_CONTEXT>(-4)); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                    }
+                }
                 const HRESULT hrOle = OleInitialize(nullptr);
 
                 m_statusMessage = RegisterWindowMessageW(WINRINGS_SHELL_STATUS_MESSAGE_W);
@@ -192,6 +202,8 @@ namespace winrings
                     if (SUCCEEDED(hrOle)) OleUninitialize();
                     return 1;
                 }
+                ChangeWindowMessageFilterEx(m_controlHwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+                ChangeWindowMessageFilterEx(m_controlHwnd, m_commandMessage, MSGFLT_ALLOW, nullptr);
 
                 if (m_previewMode)
                 {
@@ -252,12 +264,28 @@ namespace winrings
                     return 0;
                 }
 
-                if (msg == m_commandMessage && !m_previewMode)
+                if (msg == WM_COPYDATA)
                 {
-                    switch (static_cast<UINT32>(wp))
+                    const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+                    if (cds && cds->dwData == WINRINGS_COPYDATA_DELTA_V1 &&
+                        cds->cbData == sizeof(WinRingsDeltaPacket) && cds->lpData)
+                    {
+                        return HandleDeltaPacket(*static_cast<const WinRingsDeltaPacket*>(cds->lpData)) ? TRUE : FALSE;
+                    }
+                    return FALSE;
+                }
+
+                if (msg == m_commandMessage)
+                {
+                    const UINT32 cmd = static_cast<UINT32>(wp);
+                    if (m_previewMode && cmd != WINRINGS_CMD_RELOAD_CONFIG &&
+                        cmd != WINRINGS_CMD_TOGGLE_RING && cmd != WINRINGS_CMD_QUERY_SHELL_STATE)
+                        return FALSE;
+
+                    switch (cmd)
                     {
                     case WINRINGS_CMD_TOGGLE_RING:
-                        if (m_armed)
+                        if (m_armed && !m_userPaused)
                             ToggleStickyRing();
                         return TRUE;
 
@@ -272,8 +300,9 @@ namespace winrings
                         return TRUE;
 
                     case WINRINGS_CMD_REFRESH_INPUT:
-                        m_input.SetSuspended(false);
-                        m_input.ResetTransientState();
+                        m_input.SetSuspended(m_userPaused);
+                        if (!m_userPaused)
+                            m_input.ResetTransientState();
                         return TRUE;
 
                     case WINRINGS_CMD_RELOAD_CONFIG:
@@ -281,7 +310,12 @@ namespace winrings
                         return TRUE;
 
                     case WINRINGS_CMD_QUERY_SHELL_STATE:
-                        return static_cast<LRESULT>(m_armed ? WINRINGS_STATE_RING_READY : 0u);
+                    {
+                        UINT32 bits = m_armed ? WINRINGS_STATE_RING_READY : 0u;
+                        if (m_userPaused)
+                            bits |= WINRINGS_STATE_RING_PAUSED;
+                        return static_cast<LRESULT>(bits);
+                    }
 
                     case WINRINGS_CMD_REATTACH:
                         HandleReattach(reinterpret_cast<HWND>(lp));
@@ -414,12 +448,13 @@ namespace winrings
                 inputCb.isRingDragActive = [this]() { return m_overlay.IsDragOrReorderActive(); };
                 inputCb.isPointInOverlay = [this](POINT pt) { return m_overlay.IsPointInActiveBounds(pt); };
                 inputCb.getOverlayDpiScale = [this]() { return m_overlay.DpiScale(); };
-                inputCb.onTriggerPressed = [this](int x, int y) {
+                inputCb.getActiveProfileId = [this]() { return m_activeProfileId; };
+                inputCb.onTriggerPressed = [this](int x, int y, const std::wstring& profileId) {
                     const bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
                     POINT openPt{ x, y };
                     if (shiftHeld && m_config.shiftCenterOnActiveMonitor)
                         openPt = GetActiveMonitorCenterPhysical();
-                    OpenRingAt(openPt.x, openPt.y, false);
+                    OpenRingAt(openPt.x, openPt.y, false, profileId);
                 };
                 inputCb.onTriggerReleased = [this](int x, int y, bool isTap) {
                     if (!m_overlay.IsOpen())
@@ -437,9 +472,7 @@ namespace winrings
                 inputCb.onDoubleTapLastApp = [this]() {
                     if (m_overlay.IsOpen())
                         m_overlay.Dismiss();
-                    HWND prev = m_tracker.PreviousActiveWindow();
-                    if (!prev || !IsWindow(prev))
-                        prev = m_tracker.LastActiveWindow();
+                    HWND prev = m_tracker.ResolvePreviousSwitchTarget(m_overlay.Hwnd());
                     if (prev && IsWindow(prev))
                     {
                         const bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -460,8 +493,8 @@ namespace winrings
                     if (m_overlay.IsOpen())
                         m_overlay.HandleEscapeKey();
                 };
-                inputCb.onToggleRequested = [this]() {
-                    ToggleStickyRing();
+                inputCb.onToggleRequested = [this](const std::wstring& profileId) {
+                    ToggleStickyRing(profileId);
                 };
                 inputCb.onCommitRequested = [this]() {
                     if (m_overlay.IsOpen())
@@ -479,7 +512,8 @@ namespace winrings
                     if (m_overlay.IsOpen())
                         m_overlay.BackspaceFilter();
                 };
-                inputCb.onUserPointerDelta = [this]() {
+                inputCb.onUserPointerDelta = [this](POINT pt) {
+                    m_tracker.OnUserMouseMove(pt);
                 };
 
                 m_input.Install(m_config, std::move(inputCb));
@@ -488,8 +522,8 @@ namespace winrings
 
                 if (!forPreview)
                 {
-                    ShellDiagLog(L"ShellCtrl", L"Arm: Radial Switcher ready (theme=%s glass=%d tone=%d)",
-                        ToString(m_config.theme), m_config.glassLevel, m_config.lightDarkMode);
+                    ShellDiagLog(L"ShellCtrl", L"Arm: Radial Switcher ready (tex=%s glass=%d tone=%d)",
+                        ToString(m_config.surfaceTexture), m_config.glassLevel, m_config.lightDarkMode);
                     PostStatusToHost(WINRINGS_DLL_STATUS_READY);
                 }
             }
@@ -524,20 +558,33 @@ namespace winrings
                 Arm(false);
             }
 
-            void OpenRingAt(int x, int y, bool lockOpen)
+            void OpenRingAt(int x, int y, bool lockOpen, const std::wstring& profileId = L"default")
             {
-                m_tracker.RecordForegroundBeforeOpen(m_overlay.Hwnd());
+                m_activeProfileId = m_config.ResolveProfile(profileId).id;
+                if (!m_overlay.IsOpen())
+                    m_tracker.RecordForegroundBeforeOpen(m_overlay.Hwnd());
                 m_appIndex.EnsureFreshAsync();
+                m_overlay.SetActiveProfileId(m_activeProfileId);
                 auto slots = SlotModel::BuildRingSlots(
-                    m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex);
+                    m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
                 m_overlay.OpenAt(x, y, std::move(slots), lockOpen);
             }
 
-            void ToggleStickyRing()
+            void ToggleStickyRing(const std::wstring& profileId = L"default")
             {
+                const std::wstring targetProf = m_config.ResolveProfile(profileId).id;
                 if (m_overlay.IsOpen())
                 {
-                    m_overlay.Dismiss();
+                    if (_wcsicmp(m_activeProfileId.c_str(), targetProf.c_str()) == 0)
+                    {
+                        m_overlay.Dismiss();
+                        return;
+                    }
+                    m_activeProfileId = targetProf;
+                    m_overlay.SetActiveProfileId(m_activeProfileId);
+                    auto slots = SlotModel::BuildRingSlots(
+                        m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
+                    m_overlay.RefreshSlots(std::move(slots));
                     return;
                 }
                 POINT pt{};
@@ -545,7 +592,7 @@ namespace winrings
                 const bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
                 if (shiftHeld && m_config.shiftCenterOnActiveMonitor)
                     pt = GetActiveMonitorCenterPhysical();
-                OpenRingAt(pt.x, pt.y, true);
+                OpenRingAt(pt.x, pt.y, true, targetProf);
             }
 
             void ReloadConfiguration()
@@ -553,20 +600,107 @@ namespace winrings
                 if (!m_armed)
                     return;
                 m_config = SwitcherConfig::LoadOrCreate();
-                ShellDiagLog(L"ShellCtrl", L"ReloadConfiguration: theme=%s glass=%d tone=%d",
-                    ToString(m_config.theme), m_config.glassLevel, m_config.lightDarkMode);
+                ShellDiagLog(L"ShellCtrl", L"ReloadConfiguration: tex=%s glass=%d tone=%d",
+                    ToString(m_config.surfaceTexture), m_config.glassLevel, m_config.lightDarkMode);
                 ApplyLoadedConfig();
             }
 
             void ApplyLoadedConfig()
             {
+                m_activeProfileId = m_config.ResolveProfile(m_activeProfileId).id;
+                m_overlay.SetActiveProfileId(m_activeProfileId);
                 m_overlay.SetConfig(m_config);
                 m_input.UpdateConfig(m_config);
+                if (m_overlay.IsOpen())
+                {
+                    auto slots = SlotModel::BuildRingSlots(
+                        m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
+                    m_overlay.RefreshSlots(std::move(slots));
+                }
+            }
+
+            bool HandleDeltaPacket(const WinRingsDeltaPacket& pkt)
+            {
+                if (!m_armed)
+                    return false;
+
+                switch (pkt.op)
+                {
+                case DeltaOp::SetLook:
+                    if (!ApplyDeltaToConfig(m_config, pkt))
+                        return false;
+                    m_overlay.SetConfig(m_config);
+                    return true;
+
+                case DeltaOp::SetGestures:
+                case DeltaOp::SetTriggers:
+                    if (!ApplyDeltaToConfig(m_config, pkt))
+                        return false;
+                    m_overlay.SetConfig(m_config);
+                    m_input.UpdateConfig(m_config);
+                    return true;
+
+                case DeltaOp::PreviewLiveRing:
+                    if (pkt.intParam != 0)
+                    {
+                        const std::wstring reqProf = (pkt.previewProfileId[0] != L'\0')
+                            ? std::wstring(pkt.previewProfileId)
+                            : m_activeProfileId;
+                        const std::wstring targetProf = m_config.ResolveProfile(reqProf).id;
+                        if (!m_overlay.IsOpen())
+                        {
+                            const POINT pt = (pkt.anchorScreenX != 0 || pkt.anchorScreenY != 0)
+                                ? POINT{ pkt.anchorScreenX, pkt.anchorScreenY }
+                                : GetActiveMonitorCenterPhysical();
+                            OpenRingAt(pt.x, pt.y, true, targetProf);
+                        }
+                        else if (_wcsicmp(m_activeProfileId.c_str(), targetProf.c_str()) != 0)
+                        {
+                            m_activeProfileId = targetProf;
+                            m_overlay.SetActiveProfileId(m_activeProfileId);
+                            auto slots = SlotModel::BuildRingSlots(
+                                m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
+                            m_overlay.RefreshSlots(std::move(slots));
+                        }
+                        m_overlay.LockOpen();
+                        m_overlay.SetOpenedForTrayPreview(pkt.intParam == 1);
+                    }
+                    else
+                    {
+                        if (m_overlay.IsOpen() && m_overlay.IsOpenedForTrayPreview())
+                            m_overlay.Dismiss();
+                    }
+                    return true;
+
+                case DeltaOp::FlushSaveToDisk:
+                    return m_config.Save();
+
+                case DeltaOp::ReloadFromDisk:
+                    m_config = SwitcherConfig::LoadOrCreate();
+                    if (pkt.previewProfileId[0] != L'\0')
+                        m_activeProfileId = pkt.previewProfileId;
+                    ApplyLoadedConfig();
+                    return true;
+
+                case DeltaOp::SetRingPaused:
+                    m_userPaused = (pkt.intParam != 0);
+                    m_input.SetSuspended(m_userPaused);
+                    if (!m_userPaused)
+                        m_input.ResetTransientState();
+                    if (m_userPaused && m_overlay.IsOpen())
+                        m_overlay.Dismiss();
+                    return true;
+
+                default:
+                    return false;
+                }
             }
 
             HMODULE m_shellModule = nullptr;
             bool m_previewMode = false;
             bool m_armed = false;
+            bool m_userPaused = false;
+            std::wstring m_activeProfileId = L"default";
 
             HWND m_controlHwnd = nullptr;
             HWND m_hostWindow = nullptr;

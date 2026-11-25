@@ -30,6 +30,7 @@ enum WinRingsCommand : UINT32
 enum WinRingsShellStateBits : UINT32
 {
     WINRINGS_STATE_RING_READY      = 1u << 0,
+    WINRINGS_STATE_RING_PAUSED     = 1u << 1,
 };
 
 enum WinRingsHostControl : UINT32
@@ -40,6 +41,7 @@ enum WinRingsHostControl : UINT32
     WINRINGS_HOST_CTRL_RELOAD        = 4,
     WINRINGS_HOST_CTRL_RESET_SAFETY  = 5,
     WINRINGS_HOST_CTRL_QUERY_DETAILS = 7,
+    WINRINGS_HOST_CTRL_SET_PAUSED    = 8,
 };
 
 enum WinRingsHostStatus : UINT32

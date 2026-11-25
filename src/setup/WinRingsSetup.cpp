@@ -116,6 +116,20 @@ namespace
             return false;
         }
 
+        const size_t slash = destPath.find_last_of(L"\\/");
+        const std::wstring destDir = (slash != std::wstring::npos) ? destPath.substr(0, slash + 1) : L"";
+        WIN32_FIND_DATAW fd{};
+        HANDLE hFind = FindFirstFileW((destPath + L".old*").c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                    DeleteFileW((destDir + fd.cFileName).c_str());
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+
         const std::wstring tmpPath = destPath + L".tmp";
         HANDLE f = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -130,8 +144,21 @@ namespace
         FlushFileBuffers(f);
         CloseHandle(f);
 
-        if (!writeOk || !MoveFileExW(tmpPath.c_str(), destPath.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        bool replaced = writeOk && MoveFileExW(tmpPath.c_str(), destPath.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!replaced && writeOk && FileExists(destPath))
+        {
+            // Support hot upgrade even when the existing file is mapped/locked (e.g. WinRingsShell.dll in Explorer)
+            const std::wstring oldPath = destPath + L".old." + std::to_wstring(GetTickCount64());
+            if (MoveFileExW(destPath.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+            {
+                if (!DeleteFileW(oldPath.c_str()))
+                    MoveFileExW(oldPath.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+                replaced = MoveFileExW(tmpPath.c_str(), destPath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            }
+        }
+        if (!replaced)
         {
             DeleteFileW(tmpPath.c_str());
             outError = L"Failed replacing file (close running WinRings or Explorer if locked): " + destPath;
@@ -142,6 +169,19 @@ namespace
 
     void StopRunningWinRingsHost(const std::wstring& installDir)
     {
+        const UINT wakeMsg = RegisterWindowMessageW(WINRINGS_TRAY_WAKE_MESSAGE_W);
+        if (wakeMsg)
+        {
+            HWND trayHwnd = FindWindowW(WINRINGS_TRAY_WINDOW_CLASS_W, nullptr);
+            if (trayHwnd)
+                SendMessageTimeoutW(trayHwnd, wakeMsg, 2 /* quit */, 0, SMTO_ABORTIFHUNG, 1500, nullptr);
+        }
+
+        if (HWND legacyV2 = FindWindowW(L"WinRings.Settings.v2", nullptr))
+            SendMessageTimeoutW(legacyV2, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 500, nullptr);
+        if (HWND legacyDlg = FindWindowW(L"#32770", L"WinRings Settings"))
+            SendMessageTimeoutW(legacyDlg, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 500, nullptr);
+
         const std::wstring hostExe = installDir + L"\\" + WINRINGS_HOST_FILENAME_W;
         if (FileExists(hostExe))
         {
@@ -153,7 +193,7 @@ namespace
             if (CreateProcessW(hostExe.c_str(), buf.data(), nullptr, nullptr, FALSE,
                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
             {
-                WaitForSingleObject(pi.hProcess, 5000);
+                WaitForSingleObject(pi.hProcess, 4000);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
             }
@@ -164,30 +204,58 @@ namespace
         {
             HWND hostHwnd = FindWindowW(WINRINGS_HOST_WINDOW_CLASS_W, WINRINGS_HOST_WINDOW_TITLE_W);
             if (hostHwnd)
-                SendMessageTimeoutW(hostHwnd, ctrlMsg, 2 /* WINRINGS_HOST_CTRL_EXIT */, 0, SMTO_ABORTIFHUNG, 3000, nullptr);
+                SendMessageTimeoutW(hostHwnd, ctrlMsg, 2 /* WINRINGS_HOST_CTRL_EXIT */, 0, SMTO_ABORTIFHUNG, 2500, nullptr);
         }
 
-        // Wait briefly for any running WinRingsHost.exe process to exit
-        for (int attempt = 0; attempt < 25; ++attempt)
+        // Wait briefly for running WinRingsHost.exe and WinRingsTools.exe processes to exit gracefully
+        bool anyRemaining = false;
+        for (int attempt = 0; attempt < 12; ++attempt)
         {
-            bool found = false;
+            anyRemaining = false;
             HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if (snap != INVALID_HANDLE_VALUE)
             {
                 PROCESSENTRY32W pe{ sizeof(pe) };
                 for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
                 {
-                    if (_wcsicmp(pe.szExeFile, WINRINGS_HOST_FILENAME_W) == 0)
+                    if (_wcsicmp(pe.szExeFile, WINRINGS_HOST_FILENAME_W) == 0 ||
+                        _wcsicmp(pe.szExeFile, WINRINGS_TOOLS_FILENAME_W) == 0)
                     {
-                        found = true;
+                        anyRemaining = true;
                         break;
                     }
                 }
                 CloseHandle(snap);
             }
-            if (!found)
+            if (!anyRemaining)
                 break;
             Sleep(200);
+        }
+
+        if (anyRemaining)
+        {
+            const DWORD selfPid = GetCurrentProcessId();
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap != INVALID_HANDLE_VALUE)
+            {
+                PROCESSENTRY32W pe{ sizeof(pe) };
+                for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
+                {
+                    if (pe.th32ProcessID == selfPid)
+                        continue;
+                    if (_wcsicmp(pe.szExeFile, WINRINGS_HOST_FILENAME_W) == 0 ||
+                        _wcsicmp(pe.szExeFile, WINRINGS_TOOLS_FILENAME_W) == 0)
+                    {
+                        if (HANDLE proc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID))
+                        {
+                            TerminateProcess(proc, 0);
+                            WaitForSingleObject(proc, 1500);
+                            CloseHandle(proc);
+                        }
+                    }
+                }
+                CloseHandle(snap);
+            }
         }
     }
 
@@ -212,6 +280,7 @@ namespace
     bool WriteRegistryStrings(const std::wstring& installDir, bool addRunEntry)
     {
         const std::wstring hostExe = installDir + L"\\" + WINRINGS_HOST_FILENAME_W;
+        const std::wstring toolsExe = installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W;
         const std::wstring setupExe = installDir + L"\\" + WINRINGS_SETUP_FILENAME_W;
 
         if (addRunEntry)
@@ -221,10 +290,15 @@ namespace
                 L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                 0, nullptr, 0, KEY_SET_VALUE, nullptr, &runKey, nullptr) == ERROR_SUCCESS)
             {
-                const std::wstring cmd = L"\"" + hostExe + L"\"";
+                const std::wstring hostCmd = L"\"" + hostExe + L"\"";
                 RegSetValueExW(runKey, WINRINGS_PRODUCT_NAME_W, 0, REG_SZ,
-                    reinterpret_cast<const BYTE*>(cmd.c_str()),
-                    static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+                    reinterpret_cast<const BYTE*>(hostCmd.c_str()),
+                    static_cast<DWORD>((hostCmd.size() + 1) * sizeof(wchar_t)));
+
+                const std::wstring trayCmd = L"\"" + toolsExe + L"\" --tray";
+                RegSetValueExW(runKey, L"WinRingsTray", 0, REG_SZ,
+                    reinterpret_cast<const BYTE*>(trayCmd.c_str()),
+                    static_cast<DWORD>((trayCmd.size() + 1) * sizeof(wchar_t)));
                 RegCloseKey(runKey);
             }
         }
@@ -236,6 +310,7 @@ namespace
                 0, KEY_SET_VALUE, &runKey) == ERROR_SUCCESS)
             {
                 RegDeleteValueW(runKey, WINRINGS_PRODUCT_NAME_W);
+                RegDeleteValueW(runKey, L"WinRingsTray");
                 RegCloseKey(runKey);
             }
         }
@@ -299,22 +374,25 @@ namespace
 
         WriteRegistryStrings(installDir, addStartup);
         RegDeleteTreeW(HKEY_CURRENT_USER, WINRINGS_HOST_SAFETY_REGISTRY_W);
-        CreateStartMenuShortcut(installDir + L"\\" + WINRINGS_HOST_FILENAME_W);
+        CreateStartMenuShortcut(installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W);
 
         if (launchAfter)
         {
-            const std::wstring hostExe = installDir + L"\\" + WINRINGS_HOST_FILENAME_W;
-            STARTUPINFOW si{ sizeof(si) };
-            PROCESS_INFORMATION pi{};
-            std::wstring cmd = L"\"" + hostExe + L"\"";
-            std::vector<wchar_t> buf(cmd.begin(), cmd.end());
-            buf.push_back(L'\0');
-            if (CreateProcessW(hostExe.c_str(), buf.data(), nullptr, nullptr, FALSE,
-                0, nullptr, installDir.c_str(), &si, &pi))
-            {
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            }
+            auto spawnExe = [&](const std::wstring& exePath, const std::wstring& args) {
+                STARTUPINFOW si{ sizeof(si) };
+                PROCESS_INFORMATION pi{};
+                std::wstring cmd = L"\"" + exePath + L"\"" + (args.empty() ? L"" : (L" " + args));
+                std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+                buf.push_back(L'\0');
+                if (CreateProcessW(exePath.c_str(), buf.data(), nullptr, nullptr, FALSE,
+                    0, nullptr, installDir.c_str(), &si, &pi))
+                {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+            };
+            spawnExe(installDir + L"\\" + WINRINGS_HOST_FILENAME_W, L"");
+            spawnExe(installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W, L"--tray");
         }
 
         outMessage = L"Installed WinRings v" WINRINGS_PRODUCT_VERSION_STR_W L" to:\n" + installDir;
@@ -332,6 +410,7 @@ namespace
             0, KEY_SET_VALUE, &runKey) == ERROR_SUCCESS)
         {
             RegDeleteValueW(runKey, WINRINGS_PRODUCT_NAME_W);
+            RegDeleteValueW(runKey, L"WinRingsTray");
             RegCloseKey(runKey);
         }
         RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WinRings");

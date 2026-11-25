@@ -45,6 +45,7 @@ namespace winrings
 
         HWND LastActiveWindow() const noexcept { return m_lastActiveWindow; }
         HWND PreviousActiveWindow() const noexcept { return m_previousActiveWindow; }
+        HWND ResolvePreviousSwitchTarget(HWND ignoreOverlayHwnd) const;
         void SwapActiveHistory(HWND activated) noexcept;
 
         std::vector<AppWindowGroup> EnumerateGroupedWindows(HWND ignoreHwnd);
@@ -54,10 +55,12 @@ namespace winrings
 
         void ActivateWindow(HWND target, bool centerOnActiveMonitor, bool pointerFollow);
         void CancelPointerGlide() noexcept;
+        void OnUserMouseMove(POINT screenPt) noexcept;
         void OnGlideTimerTick() noexcept;
 
         static void MinimizeWindow(HWND hwnd) noexcept;
         static void CloseWindow(HWND hwnd) noexcept;
+        static void EndTaskForWindows(const std::vector<WindowEntry>& windows) noexcept;
         static std::wstring NormalizeAppKey(const std::wstring& exePath, const std::wstring& fallbackName);
         static bool AppKeysMatch(const std::wstring& a, const std::wstring& b);
         static bool IsEligibleWindow(HWND hwnd, HWND shellWindow, HWND ignoreHwnd,
@@ -85,9 +88,11 @@ namespace winrings
 
         // Non-blocking pointer glide state
         bool m_gliding = false;
+        HWND m_glideTargetHwnd = nullptr;
         POINT m_glideStart{};
         POINT m_glideTarget{};
         POINT m_glideLastExpected{};
+        POINT m_glideNextExpected{};
         int m_glideStep = 0;
 
         static WindowTracker* s_instance;

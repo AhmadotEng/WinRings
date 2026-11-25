@@ -20,6 +20,7 @@
 #include "../shared/CrashGuard.h"
 #include "../shared/WinRingsApi.h"
 #include "../shared/WinRingsConfig.h"
+#include "../shared/WinRingsDeltaIpc.h"
 
 using namespace winrings;
 
@@ -28,18 +29,9 @@ namespace
     constexpr UINT_PTR kRetryTimer = 1;
     constexpr UINT_PTR kInjectionTimer = 2;
     constexpr UINT_PTR kStopTimer = 3;
-    constexpr UINT_PTR kTrayRetryTimer = 4;
     constexpr DWORD kInjectionTimeoutMs = 6000;
     constexpr DWORD kStopTimeoutMs = 5500;
     constexpr DWORD kRetryDelayMs[] = { 100, 250, 500, 1000, 2000, 4000, 4000 };
-
-    constexpr UINT kTrayCallbackMsg = WM_APP + 100;
-    constexpr UINT kTrayIconId = 1;
-    constexpr UINT kMenuCmdOpenRing = 1001;
-    constexpr UINT kMenuCmdSettings = 1003;
-    constexpr UINT kMenuCmdReload = 1004;
-    constexpr UINT kMenuCmdConfigFolder = 1005;
-    constexpr UINT kMenuCmdExit = 1006;
 
     constexpr wchar_t kSafetyDisabledValue[] = L"InjectionDisabled";
     constexpr wchar_t kCrashCountValue[] = L"AbnormalExplorerExitCount";
@@ -133,14 +125,12 @@ namespace
         bool inputStateApplied = false;
         bool sessionEnding = false;
         bool authenticatedDisarmed = false;
+        bool userPaused = false;
         HMODULE wtsApi = nullptr;
         WTSRegisterSessionNotificationFn registerSessionNotification = nullptr;
         WTSUnregisterSessionNotificationFn unregisterSessionNotification = nullptr;
         bool sessionNotificationRegistered = false;
         UINT_PTR attemptCookie = 0;
-        bool trayAdded = false;
-        HICON trayIcon = nullptr;
-        unsigned trayRetryCount = 0;
     };
 
     HostRuntime g_runtime;
@@ -880,6 +870,32 @@ namespace
             static_cast<WPARAM>(cmd), 0) != FALSE;
     }
 
+    bool ForwardDeltaToShell(const WinRingsDeltaPacket& pkt)
+    {
+        if (!ExplorerProcessStillAlive())
+            return false;
+        if ((!g_runtime.shellControlWindow || !IsWindow(g_runtime.shellControlWindow)) &&
+            g_runtime.explorer.processId)
+        {
+            g_runtime.shellControlWindow = FindShellControlWindow(g_runtime.explorer.processId);
+        }
+        if (!g_runtime.shellControlWindow || !IsWindow(g_runtime.shellControlWindow))
+            return false;
+
+        COPYDATASTRUCT cds{};
+        cds.dwData = WINRINGS_COPYDATA_DELTA_V1;
+        cds.cbData = sizeof(WinRingsDeltaPacket);
+        cds.lpData = const_cast<WinRingsDeltaPacket*>(&pkt);
+        DWORD_PTR res = 0;
+        if (!SendMessageTimeoutW(g_runtime.shellControlWindow, WM_COPYDATA,
+            reinterpret_cast<WPARAM>(g_runtime.window), reinterpret_cast<LPARAM>(&cds),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 600, &res))
+        {
+            return false;
+        }
+        return res != 0;
+    }
+
     bool ReconcileInteractiveInput()
     {
         const bool missed = g_runtime.inputGeneration != g_runtime.injectionInputGeneration;
@@ -1114,7 +1130,9 @@ namespace
         }
         if (!ReconcileInteractiveInput())
             return;
-        if (g_runtime.pendingToggle)
+        if (g_runtime.userPaused)
+            ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, 1u));
+        if (g_runtime.pendingToggle && !g_runtime.userPaused)
         {
             if (SendShellCommand(WINRINGS_CMD_TOGGLE_RING))
                 g_runtime.pendingToggle = false;
@@ -1206,271 +1224,21 @@ namespace
         std::wstring toolsPath;
         if (!ResolveSiblingBinary(WINRINGS_TOOLS_FILENAME_W, toolsPath))
             return;
-        SHELLEXECUTEINFOW sei{ sizeof(sei) };
-        sei.lpFile = toolsPath.c_str();
-        sei.lpParameters = args;
-        sei.nShow = SW_SHOWNORMAL;
-        ShellExecuteExW(&sei);
-    }
-
-    HICON CreateWinRingsTrayIcon() noexcept
-    {
-        constexpr int kSize = 32;
-        BITMAPV5HEADER bi{};
-        bi.bV5Size = sizeof(bi);
-        bi.bV5Width = kSize;
-        bi.bV5Height = -kSize; // top-down
-        bi.bV5Planes = 1;
-        bi.bV5BitCount = 32;
-        bi.bV5Compression = BI_BITFIELDS;
-        bi.bV5RedMask = 0x00FF0000;
-        bi.bV5GreenMask = 0x0000FF00;
-        bi.bV5BlueMask = 0x000000FF;
-        bi.bV5AlphaMask = 0xFF000000;
-
-        void* bits = nullptr;
-        HDC screenDc = GetDC(nullptr);
-        HBITMAP colorBmp = CreateDIBSection(screenDc, reinterpret_cast<BITMAPINFO*>(&bi),
-            DIB_RGB_COLORS, &bits, nullptr, 0);
-        ReleaseDC(nullptr, screenDc);
-        if (!colorBmp || !bits)
+        std::wstring cmd = L"\"" + toolsPath + L"\"";
+        if (args && args[0] != L'\0')
         {
-            if (colorBmp)
-                DeleteObject(colorBmp);
-            return LoadIconW(nullptr, IDI_APPLICATION);
+            cmd.push_back(L' ');
+            cmd += args;
         }
-
-        auto* px = static_cast<uint32_t*>(bits);
-        constexpr float cx = (kSize - 1) * 0.5f;
-        constexpr float cy = (kSize - 1) * 0.5f;
-        for (int y = 0; y < kSize; ++y)
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+        buf.push_back(L'\0');
+        STARTUPINFOW si{ sizeof(si) };
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(toolsPath.c_str(), buf.data(), nullptr, nullptr, FALSE,
+            0, nullptr, nullptr, &si, &pi))
         {
-            for (int x = 0; x < kSize; ++x)
-            {
-                const float dx = static_cast<float>(x) - cx;
-                const float dy = static_cast<float>(y) - cy;
-                const float dist = std::sqrt(dx * dx + dy * dy);
-
-                // Outer ring radius ~11.2, stroke thickness ~3.2, plus small center dot ~2.2
-                const float ringDist = std::fabs(dist - 10.8f);
-                float alpha = 0.0f;
-                if (ringDist < 2.4f)
-                    alpha = (std::clamp)(2.4f - ringDist, 0.0f, 1.0f);
-                if (dist < 2.8f)
-                    alpha = (std::max)(alpha, (std::clamp)(2.8f - dist, 0.0f, 1.0f));
-
-                if (alpha > 0.01f)
-                {
-                    const uint32_t a = static_cast<uint32_t>(alpha * 255.0f + 0.5f);
-                    // Cyan-blue gradient (#31B8FF -> #1F7BFF)
-                    const float t = (static_cast<float>(y) / static_cast<float>(kSize));
-                    const uint32_t r = static_cast<uint32_t>((49.0f * (1.0f - t) + 31.0f * t) * alpha);
-                    const uint32_t g = static_cast<uint32_t>((200.0f * (1.0f - t) + 134.0f * t) * alpha);
-                    const uint32_t b = static_cast<uint32_t>(255.0f * alpha);
-                    px[y * kSize + x] = (a << 24) | (r << 16) | (g << 8) | b;
-                }
-                else
-                {
-                    px[y * kSize + x] = 0;
-                }
-            }
-        }
-
-        HBITMAP maskBmp = CreateBitmap(kSize, kSize, 1, 1, nullptr);
-        ICONINFO ii{};
-        ii.fIcon = TRUE;
-        ii.hbmMask = maskBmp;
-        ii.hbmColor = colorBmp;
-        HICON icon = CreateIconIndirect(&ii);
-        DeleteObject(colorBmp);
-        if (maskBmp)
-            DeleteObject(maskBmp);
-        return icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
-    }
-
-    void EnsureTrayIconPromoted() noexcept
-    {
-        HKEY hRoot = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings",
-                0, KEY_READ | KEY_WRITE, &hRoot) != ERROR_SUCCESS || !hRoot)
-        {
-            return;
-        }
-
-        wchar_t subKeyName[128]{};
-        for (DWORD idx = 0; ; ++idx)
-        {
-            DWORD nameLen = _countof(subKeyName);
-            if (RegEnumKeyExW(hRoot, idx, subKeyName, &nameLen, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
-                break;
-
-            HKEY hSub = nullptr;
-            if (RegOpenKeyExW(hRoot, subKeyName, 0, KEY_READ | KEY_WRITE, &hSub) != ERROR_SUCCESS || !hSub)
-                continue;
-
-            wchar_t exePath[512]{};
-            DWORD cbExe = sizeof(exePath);
-            DWORD type = 0;
-            const bool hasExe = (RegQueryValueExW(hSub, L"ExecutablePath", nullptr, &type,
-                reinterpret_cast<LPBYTE>(exePath), &cbExe) == ERROR_SUCCESS &&
-                (type == REG_SZ || type == REG_EXPAND_SZ));
-
-            wchar_t tip[256]{};
-            DWORD cbTip = sizeof(tip);
-            const bool hasTip = (RegQueryValueExW(hSub, L"InitialTooltip", nullptr, &type,
-                reinterpret_cast<LPBYTE>(tip), &cbTip) == ERROR_SUCCESS &&
-                (type == REG_SZ || type == REG_EXPAND_SZ));
-
-            if ((hasExe && wcsstr(exePath, L"WinRingsHost.exe") != nullptr) ||
-                (hasTip && wcsstr(tip, L"WinRings") != nullptr))
-            {
-                DWORD promoted = 0;
-                DWORD cbPromoted = sizeof(promoted);
-                DWORD valType = 0;
-                const LONG qRes = RegQueryValueExW(hSub, L"IsPromoted", nullptr, &valType,
-                    reinterpret_cast<LPBYTE>(&promoted), &cbPromoted);
-                if (qRes != ERROR_SUCCESS || promoted != 1u)
-                {
-                    const DWORD one = 1u;
-                    RegSetValueExW(hSub, L"IsPromoted", 0, REG_DWORD,
-                        reinterpret_cast<const BYTE*>(&one), sizeof(one));
-                }
-            }
-            RegCloseKey(hSub);
-        }
-        RegCloseKey(hRoot);
-    }
-
-    void AddTrayIcon(HWND hwnd)
-    {
-        if (!g_runtime.trayIcon)
-            g_runtime.trayIcon = CreateWinRingsTrayIcon();
-
-        NOTIFYICONDATAW nid{ sizeof(nid) };
-        nid.hWnd = hwnd;
-        nid.uID = kTrayIconId;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        nid.uCallbackMessage = kTrayCallbackMsg;
-        nid.hIcon = g_runtime.trayIcon;
-        wcscpy_s(nid.szTip, L"WinRings — Radial Switcher");
-        if (Shell_NotifyIconW(NIM_ADD, &nid) || Shell_NotifyIconW(NIM_MODIFY, &nid))
-        {
-            g_runtime.trayAdded = true;
-            KillTimer(hwnd, kTrayRetryTimer);
-            EnsureTrayIconPromoted();
-        }
-        else if (g_runtime.trayRetryCount < 30)
-        {
-            ++g_runtime.trayRetryCount;
-            SetTimer(hwnd, kTrayRetryTimer, 1000, nullptr);
-        }
-    }
-
-    void RemoveTrayIcon(HWND hwnd)
-    {
-        KillTimer(hwnd, kTrayRetryTimer);
-        if (g_runtime.trayAdded)
-        {
-            NOTIFYICONDATAW nid{ sizeof(nid) };
-            nid.hWnd = hwnd;
-            nid.uID = kTrayIconId;
-            Shell_NotifyIconW(NIM_DELETE, &nid);
-            g_runtime.trayAdded = false;
-        }
-        if (g_runtime.trayIcon)
-        {
-            DestroyIcon(g_runtime.trayIcon);
-            g_runtime.trayIcon = nullptr;
-        }
-    }
-
-    void EnableDarkWin32Menus() noexcept
-    {
-        if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
-        {
-            using SetPreferredAppModeFn = int (WINAPI*)(int);
-            using FlushMenuThemesFn = void (WINAPI*)();
-            if (auto setMode = reinterpret_cast<SetPreferredAppModeFn>(
-                GetProcAddress(ux, MAKEINTRESOURCEA(135))))
-                setMode(2); // AllowDark
-            if (auto flush = reinterpret_cast<FlushMenuThemesFn>(
-                GetProcAddress(ux, MAKEINTRESOURCEA(136))))
-                flush();
-            FreeLibrary(ux);
-        }
-    }
-
-    void ShowTrayContextMenu(HWND hwnd)
-    {
-        POINT pt{};
-        GetCursorPos(&pt);
-        HMENU menu = CreatePopupMenu();
-        if (!menu)
-            return;
-        AppendMenuW(menu, MF_STRING, kMenuCmdOpenRing, L"Open Ring Now");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuCmdSettings, L"Settings...");
-        AppendMenuW(menu, MF_STRING, kMenuCmdReload, L"Reload Config");
-        AppendMenuW(menu, MF_STRING, kMenuCmdConfigFolder, L"Open Config Folder");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuCmdExit, L"Exit WinRings");
-        SetMenuDefaultItem(menu, kMenuCmdSettings, FALSE);
-
-        // Passively open menu cleanly below top-docked taskbar if another tool (e.g. ClearTaskbar) docks it at the top
-        UINT menuFlags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
-        HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
-        if (tray)
-        {
-            HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi{ sizeof(mi) };
-            RECT rcTray{};
-            if (GetMonitorInfoW(mon, &mi) && GetWindowRect(tray, &rcTray) &&
-                rcTray.top <= mi.rcMonitor.top + 8 &&
-                rcTray.bottom > mi.rcMonitor.top &&
-                rcTray.bottom <= mi.rcMonitor.top + 120)
-            {
-                if (pt.y < rcTray.bottom + 4)
-                {
-                    pt.y = rcTray.bottom + 4;
-                    menuFlags |= TPM_TOPALIGN;
-                }
-            }
-        }
-
-        SetForegroundWindow(hwnd);
-        const UINT cmd = TrackPopupMenuEx(menu, menuFlags, pt.x, pt.y, hwnd, nullptr);
-        DestroyMenu(menu);
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-
-        switch (cmd)
-        {
-        case kMenuCmdOpenRing:
-            if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
-                SendShellCommand(WINRINGS_CMD_TOGGLE_RING);
-            break;
-        case kMenuCmdSettings:
-            LaunchSiblingTools(L"--settings");
-            break;
-        case kMenuCmdReload:
-        {
-            const bool sent = (g_runtime.status == WINRINGS_HOST_STATUS_READY) &&
-                SendShellCommand(WINRINGS_CMD_RELOAD_CONFIG);
-            HostDiagLog(L"TrayMenu ReloadConfig: status=%d ctrl=0x%p sent=%d",
-                static_cast<int>(g_runtime.status), g_runtime.shellControlWindow, sent ? 1 : 0);
-            break;
-        }
-        case kMenuCmdConfigFolder:
-        {
-            const std::wstring dir = SwitcherConfig::AppDataDirectory();
-            SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
-            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            break;
-        }
-        case kMenuCmdExit:
-            RequestStop();
-            break;
-        default:
-            break;
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
         }
     }
 
@@ -1490,12 +1258,28 @@ namespace
 
     LRESULT CALLBACK HostWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
+        if (message == WM_COPYDATA)
+        {
+            const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+            if (cds && cds->dwData == WINRINGS_COPYDATA_DELTA_V1 &&
+                cds->cbData == sizeof(WinRingsDeltaPacket) && cds->lpData)
+            {
+                const auto* pkt = static_cast<const WinRingsDeltaPacket*>(cds->lpData);
+                if (pkt->op == DeltaOp::SetRingPaused)
+                    g_runtime.userPaused = (pkt->intParam != 0);
+                if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
+                    return ForwardDeltaToShell(*pkt) ? TRUE : FALSE;
+                return FALSE;
+            }
+            return FALSE;
+        }
+
         if (message == g_runtime.hostControlMessage)
         {
             switch (static_cast<WinRingsHostControl>(wParam))
             {
             case WINRINGS_HOST_CTRL_TOGGLE:
-                if (!g_runtime.interactiveInput)
+                if (!g_runtime.interactiveInput || g_runtime.userPaused)
                     return FALSE;
                 if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
                     return SendShellCommand(WINRINGS_CMD_TOGGLE_RING) ? TRUE : FALSE;
@@ -1519,9 +1303,16 @@ namespace
                 LRESULT shellBits = 0;
                 if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
                     SendShellCommand(WINRINGS_CMD_QUERY_SHELL_STATE, &shellBits);
+                if (g_runtime.userPaused)
+                    shellBits |= WINRINGS_STATE_RING_PAUSED;
                 return static_cast<LRESULT>(static_cast<DWORD>(g_runtime.status) |
                     (static_cast<DWORD>(shellBits & 0xFFFF) << 16));
             }
+            case WINRINGS_HOST_CTRL_SET_PAUSED:
+                g_runtime.userPaused = (lParam != 0);
+                if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
+                    return ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, g_runtime.userPaused ? 1u : 0u)) ? TRUE : FALSE;
+                return TRUE;
             case WINRINGS_HOST_CTRL_RESET_SAFETY:
                 if (!ResetSafetyState())
                     return FALSE;
@@ -1543,8 +1334,6 @@ namespace
 
         if (message == g_runtime.taskbarCreatedMessage)
         {
-            g_runtime.trayAdded = false;
-            AddTrayIcon(window);
             if (!g_runtime.exitPending && !ExplorerProcessStillAlive())
             {
                 g_runtime.activationCommitted = false;
@@ -1555,11 +1344,6 @@ namespace
 
         switch (message)
         {
-        case kTrayCallbackMsg:
-            if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
-                ShowTrayContextMenu(window);
-            return 0;
-
         case WM_WTSSESSION_CHANGE:
             if (wParam == WTS_SESSION_LOGOFF) g_runtime.sessionEnding = true;
             else if (wParam == WTS_SESSION_LOGON) g_runtime.sessionEnding = false;
@@ -1614,11 +1398,6 @@ namespace
                 DestroyWindow(window);
                 return 0;
             }
-            if (wParam == kTrayRetryTimer)
-            {
-                AddTrayIcon(window);
-                return 0;
-            }
             break;
 
         case WM_CLOSE:
@@ -1642,7 +1421,6 @@ namespace
             return 0;
 
         case WM_DESTROY:
-            RemoveTrayIcon(window);
             UnregisterSessionNotifications();
             PostQuitMessage(0);
             return 0;
@@ -1664,10 +1442,12 @@ namespace
         Invalid
     };
 
-    LaunchCommand ParseCommand(int argc, wchar_t** argv)
+    LaunchCommand ParseCommand(int argc, wchar_t** argv, bool& outNoTray)
     {
+        outNoTray = false;
         if (argc == 1) return LaunchCommand::Host;
         if (argc != 2) return LaunchCommand::Invalid;
+        if (_wcsicmp(argv[1], L"--no-tray") == 0) { outNoTray = true; return LaunchCommand::Host; }
         if (_wcsicmp(argv[1], L"--toggle") == 0) return LaunchCommand::Toggle;
         if (_wcsicmp(argv[1], L"--exit") == 0) return LaunchCommand::Exit;
         if (_wcsicmp(argv[1], L"--status") == 0) return LaunchCommand::Status;
@@ -1751,7 +1531,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv)
         return static_cast<int>(GetLastError());
-    const LaunchCommand cmd = ParseCommand(argc, argv);
+    bool noTray = false;
+    const LaunchCommand cmd = ParseCommand(argc, argv, noTray);
     LocalFree(argv);
 
     if (cmd == LaunchCommand::Version)
@@ -1761,7 +1542,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     }
     if (cmd == LaunchCommand::Settings)
     {
-        LaunchSiblingTools(L"--settings");
+        LaunchSiblingTools(L"--open");
         return 0;
     }
     if (cmd == LaunchCommand::Preview)
@@ -1816,8 +1597,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         return static_cast<int>(GetLastError());
     }
 
-    EnableDarkWin32Menus();
-
     g_runtime.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         WINRINGS_HOST_WINDOW_CLASS_W, WINRINGS_HOST_WINDOW_TITLE_W, WS_POPUP,
         0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
@@ -1830,7 +1609,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     ChangeWindowMessageFilterEx(g_runtime.window, g_runtime.hostControlMessage, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(g_runtime.window, g_runtime.shellStatusMessage, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(g_runtime.window, g_runtime.taskbarCreatedMessage, MSGFLT_ALLOW, nullptr);
-    ChangeWindowMessageFilterEx(g_runtime.window, kTrayCallbackMsg, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(g_runtime.window, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
 
     LoadSafetyState();
     if (cmd == LaunchCommand::ResetSafety && !ResetSafetyState())
@@ -1841,9 +1620,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     }
 
     RegisterSessionNotifications();
-    AddTrayIcon(g_runtime.window);
     if (cmd == LaunchCommand::Toggle)
         g_runtime.pendingToggle = true;
+
+    if (!noTray)
+        LaunchSiblingTools(L"--tray");
 
     BeginConnection(true);
 

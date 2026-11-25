@@ -29,11 +29,11 @@ WinRings is a pure Radial Switcher & Gesture Launcher — it never hooks Windows
 ## Key Features
 
 ### 1. Radial Switcher (`RingOverlay`, `AcrylicBackdrop`, `RingThemeEngine`, `AppIndex`, `DwmThumbPool`, `InputEngine`)
-- **Approved Native A4S-Menu Frosted Acrylic & 3D Beveled Glass Edges (`RingOverlay` + `RingThemeEngine`):**
-  - **Exact Native A4S-Menu Backdrop:** Uses a synchronized click-through backdrop window (`WinRings.WcaBackdrop.v1`) running Windows 11's native `SetWindowCompositionAttribute(WCA_ACCENT_POLICY, ACCENT_ENABLE_ACRYLICBLURBEHIND, state = 4, flags = 0x13, 0x80202020)` with `BeginBufferedPaint(BPPF_ERASE)` and hash-gated `SetWindowRgn` (`RGN_DIFF` hollow annulus, curved outer arcs, and rounded pills) — delivering the exact same DWM acrylic texture, blur, luminosity, and glow as A4S-Menu, with automatic fallback to `Windows::UI::Composition` (`AcrylicBackdrop`).
-  - **Smooth 3D Glass Bevel Rims:** Layered directly beneath the antialiased Direct2D + DirectComposition foreground overlay (`WinRings.Overlay.v1`), which bridges the `1.0 px` inset region boundary with a `2.0 DIP` antialiased edge-bridge, a subtle top-lit 3D outer glass bezel gradient, an optically recessed 3D inner bevel gradient, and a soft elevation shadow lip.
-  - **3 Visual Style Presets:** **`A4S`** (default A4S-Menu live wallpaper-reactive frosted acrylic), **`DarkWood`** (matte `#202020` dark surface), and **`Blue`** (`#3186FF` sapphire glass), paired with continuous **Glass Level (`0–100%`)** and **Light / Dark Mode (`0–100%`)** sliders.
-  - **True Annulus Geometry:** Clean open center ring (`holeRadius = 60 DIP`, `outerRadius = 148 DIP`, `ringRadius = 112 DIP`, `iconSize = 42 DIP`) with no shaded center disc or cone wedge overlay.
+- **Honest Multi-Texture Engine & Free Tinting (`RingOverlay` + `RingThemeEngine`):**
+  - **3 Genuine Surface Textures:** **`A4SAcrylic`** (default Windows 11 native `WCA_ACCENT_POLICY` `ACCENT_ENABLE_ACRYLICBLURBEHIND` + `1.0 px`-inset `SetWindowRgn`), **`TaskbarGlass`** (`Windows::UI::Composition` `HostBackdropBrush` + `dwmcore` wide-diffusion blur/luminosity graph), and **`PureMatte`** (clean zero-blur translucent or solid surface).
+  - **Any Surface Color & Auto Sync:** Tint any of the three textures with Dark, Light, `Auto System` (`AppsUseLightTheme`), curated swatches, or any custom `#RRGGBB` color via native `ChooseColorW`, paired with continuous **Glass / Opacity**, **Brightness**, and **Ring Size** sliders.
+  - **Smooth 3D Glass Bevel Rims:** Layered on `WinRings.Overlay.v1` with a `2.0 DIP` antialiased edge-bridge, top-lit 3D outer glass bezel gradient, optically recessed 3D inner bevel gradient, and soft elevation shadow lip.
+  - **True Annulus Geometry:** Clean open center ring with no shaded center disc or cone wedge overlay.
 - **Frame-0 Instant Response:** Opens at full scale on frame 0 (`disableOpeningAnimation = true` by default) and respects Windows `SPI_GETCLIENTAREAANIMATION`.
 - **Bounded Annulus + Cone Hit-Testing (`18 DIP` Deadzone):** Tight `18 DIP` inner deadzone (`ringDeadzoneDip = 18.0`) with strictly bounded main-ring hover detection (`dist <= outerRadius + 14 DIP`) so moving into empty outer space never triggers unexpanded slots, while active outer submenus remain reachable through their angular hover corridor.
 - **System-Wide App Search & Top Half-Ring (`AppIndex` + `SearchMatch`):**
@@ -55,9 +55,11 @@ WinRings is a pure Radial Switcher & Gesture Launcher — it never hooks Windows
     - **Direct Slot Drop:** Drop files onto an **App/Script** to launch with those files, onto a **Folder** (e.g., `Downloads`) to copy into it cleanly, or onto **Recycle Bin** to delete.
     - **Spring-Loaded Window Switching:** Hold a dragged file over any **App** or **Folder** icon for ~0.5s — the icon plays a double-heartbeat scale animation and brings that app/folder window to the front while you keep holding the file so you can drop it right inside.
     - **Drag Icons to Reorder:** Press and drag any pinned icon around the ring to reorder pinned slots live and persist to `config.json`.
-- **4-Page Settings Suite with Persistent 1:1 GPU Preview (`WinRingsTools.exe --settings`):**
-  - `1040x660` dark-mode native Win32 + Direct2D 1.1 Settings UI (**Appearance**, **Triggers & Input**, **Pins & Folders**, **Advanced**).
-  - Live 1:1 GPU effect-graph preview shown across **Appearance**, **Pins & Folders**, and **Advanced** using the shared `RingThemeEngine.h`, `RadialMath.h`, frosted noise texture, real extracted shell icons, running dots, and **Split Test** / **Live Desktop** backdrop toggle.
+- **Independent Tray Icon & `376x544 DIP` Direct2D Control Flyout (`WinRingsTools.exe`):**
+  - Completely decoupled from headless `WinRingsHost.exe` (which auto-starts `WinRingsTools.exe --tray` on normal Explorer launch unless `--no-tray` is passed): left-click opens the compact **Triggers**, **Profiles**, & **Look** Flyout cleanly above the taskbar, closing the Flyout frees all D3D/D2D COM/HWND handles, and `Quit Tray` exits `WinRingsTools.exe` without stopping the Ring.
+  - **Multi-Profile Rings (`default` + built-in `SMenu`) & Trigger Binding:** Switch any trigger between profiles directly in **Triggers**, or customize/create profiles in **Profiles** (Apps/Files, Folders, Links/Commands with `Run as Administrator`). Built-in **`SMenu`** places Windows `Win+X` tools (top curved arc), elevated `CMD`/`PowerShell (Admin)` (right), `Power` (`Switch User`, `Shut Down`, `Restart` bottom arc), `Settings` & `Control Panel` (left), while Type-to-Search still searches all system apps.
+  - **Live Shortcut Capture & Conflict Advisor:** Record up to 8 triggers in a scrollable list—including mouse buttons, `Right+Left` chords, `Alt+Tab`, `Win+Tab`, single non-modifier keys, or solo `Win`/`Alt` taps (without breaking `Win+Key`/`Alt+Key` shortcuts)—with a 1-line note explaining any Windows behavior replaced.
+  - **Real Side-by-Side Ring Preview, Taskbar-Style Context Menu & `End Task`:** Opening **Profiles** or **Look** pops up the real `RingOverlay` beside the Flyout and streams `WM_COPYDATA` delta packets directly into memory. Right-click any Ring icon for a crisp Direct2D menu with **End task** (force-terminating non-OS apps cleanly), **Close window**, **Run as administrator**, and **Hide from ring (search only)**; **Display Name**, **Custom Icon**, **Hide from Ring**, and **Run as Administrator** editing live inline inside **Profiles -> Edit** in `WinRingsTools.exe`.
 
 ---
 
@@ -66,15 +68,15 @@ WinRings is a pure Radial Switcher & Gesture Launcher — it never hooks Windows
 ```mermaid
 flowchart LR
     subgraph UserSpace["Out-of-Process Supervisor & Utilities"]
-        Host["WinRingsHost.exe<br/>(Tray Host, CrashGuard, CLI)"]
-        Tools["WinRingsTools.exe<br/>(4-Page Settings + 1:1 GPU Preview)"]
+        Host["WinRingsHost.exe<br/>(Headless Supervisor, CrashGuard, CLI)"]
+        Tools["WinRingsTools.exe<br/>(Independent Tray + 376x544 Control Flyout)"]
         Setup["WinRingsSetup.exe<br/>(SHA-256 Single-File Installer)"]
     end
 
     subgraph ExplorerProc["explorer.exe (In-Process Shell Extension)"]
         Shell["WinRingsShell.dll<br/>(ShellController)"]
-        Ring["RingOverlay + AcrylicBackdrop + AppIndex + DwmThumbPool<br/>(Native WCA + Direct2D + DirectComposition + DWM)"]
-        Input["InputEngine<br/>(WH_MOUSE_LL / WH_KEYBOARD_LL / Hotkeys)"]
+        Ring["RingOverlay + AcrylicBackdrop + AppIndex + DwmThumbPool<br/>(Native WCA / HostBackdrop + Direct2D + DirectComposition)"]
+        Input["InputEngine<br/>(WH_MOUSE_LL / WH_KEYBOARD_LL / Solo Modifiers)"]
     end
 
     Setup -->|Installs & Verifies SHA-256| Host
@@ -82,17 +84,17 @@ flowchart LR
     Setup -->|Installs & Verifies SHA-256| Tools
     Host -->|CreateRemoteThread + Attempt Cookie| Shell
     Host <-->|Registered Control / Status Messages| Shell
-    Tools -->|Saves config.json & triggers --reload| Host
+    Tools -->|Surgical WM_COPYDATA Deltas| Host
     Shell --> Ring
     Shell --> Input
 ```
 
-| Binary | Size | Role |
-| :--- | :--- | :--- |
-| **`WinRingsHost.exe`** | `~207 KB` | Resident supervisor, custom cyan ring tray icon (auto-promoted in `HKCU\Control Panel\NotifyIconSettings`), Explorer injection handshake, 3-crash-in-180s safety circuit breaker, and CLI dispatcher. |
-| **`WinRingsShell.dll`** | `~661 KB` | In-process Explorer module hosting `RingOverlay`, `AcrylicBackdrop`, `RingThemeEngine`, `AppIndex`, `DwmThumbPool`, `InputEngine`, `WindowTracker`, `SlotModel`, and `DropTarget`. Zero taskbar or XAML hooks. |
-| **`WinRingsTools.exe`** | `~396 KB` | Dark-mode native Win32/Direct2D 1.1/WIC 4-page Settings UI (`1040x660` with persistent 1:1 GPU Ring preview). |
-| **`WinRingsSetup.exe`** | `~1.42 MB` | Self-contained per-user installer embedding all 3 binaries as `RT_RCDATA` with `BCrypt` SHA-256 verification. |
+| Binary | Role |
+| :--- | :--- |
+| **`WinRingsHost.exe`** | Headless background supervisor, Explorer injection handshake, 3-crash-in-180s safety circuit breaker, `WM_COPYDATA` delta forwarder, and CLI dispatcher. |
+| **`WinRingsShell.dll`** | In-process Explorer module hosting `RingOverlay`, `AcrylicBackdrop`, `RingThemeEngine`, `AppIndex`, `DwmThumbPool`, `InputEngine`, `WindowTracker`, `SlotModel`, and `DropTarget`. Zero taskbar or XAML hooks. |
+| **`WinRingsTools.exe`** | Independent resident Tray icon + on-demand `376x544 DIP` Direct2D Control Flyout (`--tray`, `--open`, `--quit`). |
+| **`WinRingsSetup.exe`** | Self-contained per-user installer embedding all 3 binaries as `RT_RCDATA` with `BCrypt` SHA-256 verification. |
 
 ---
 
@@ -138,7 +140,7 @@ If you prefer managing startup items via `shell:startup` (`C:\Users\<User>\AppDa
 | **Double-Tap Last App** | Double-tap **Mouse Side Back (`XButton1`)** `< 280 ms` | Instantly switches between your current and previous foreground window. |
 | **Keyboard Hotkey** | **`Alt + Space`** | Toggles the Ring in Sticky Mode at the cursor (or monitor center if `Shift` is held). |
 | **Menu Key** | **`VK_APPS`** | Toggles the Ring in Sticky Mode. |
-| **Tray Icon** | Left-click / Right-click **Cyan Ring Tray Icon** | Both left-click and right-click open the WinRings tray menu (`Open Ring Now`, `Settings...`, `Reload Config`, `Open Config Folder`, `Exit WinRings`). |
+| **Tray Icon** | Left-click / Right-click **Cyan Ring Tray Icon** (`WinRingsTools.exe`) | Left-click toggles the compact Control Flyout (`Triggers` & `Look`); right-click shows live engine status, `Pause/Resume/Start Ring`, `Open Ring Now`, `Quit Tray (Keep Ring Running)`, and `Stop Everything`. |
 
 ---
 
@@ -151,8 +153,12 @@ If you prefer managing startup items via `shell:startup` (`C:\Users\<User>\AppDa
 # Toggle the Radial Ring overlay
 & "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsHost.exe" --toggle
 
-# Open the 4-page Settings & Pins UI (with live 1:1 GPU preview)
-& "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsHost.exe" --settings
+# Open the Tray Control Flyout (with live Ring preview)
+& "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsTools.exe" --open
+
+# Start Tray resident silently or quit Tray without stopping the Ring
+& "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsTools.exe" --tray
+& "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsTools.exe" --quit
 
 # Hot-reload %APPDATA%\WinRings\config.json into Explorer
 & "$env:LOCALAPPDATA\WinRings\v1.0.0.0\WinRingsHost.exe" --reload
@@ -236,7 +242,7 @@ Verifies x64 PE headers, zero CLR imports, DLL exports, ABI contract (`WinRingsA
 - **[docs/INTERACTION_AND_MATH.md](docs/INTERACTION_AND_MATH.md)** — `InputEngine` triggers, click-vs-drag, `RadialMath.h` corridors/arcs, drag-and-drop workflows, spring-loading, reorder math, and 4-tier search.
 - **[docs/BUILDING_AND_TESTING.md](docs/BUILDING_AND_TESTING.md)** — MSVC x64 build pipeline, 5 verification gates, safe `--preview`/`--settings` testing, and `shell_diag.log` diagnostics.
 - **[docs/ROADMAP_AND_IDEAS.md](docs/ROADMAP_AND_IDEAS.md)** — Feature ideas, UX polish opportunities, modularity refactors, and scope guardrails for WinRings v3.1+.
-- **[CHANGELOG.md](CHANGELOG.md)** — Full release history (`v1.0.0` through `v3.0.0`).
+- **[CHANGELOG.md](CHANGELOG.md)** — Full release history (`v1.0.0` through `v3.1.0`).
 
 ---
 

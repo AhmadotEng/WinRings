@@ -1,9 +1,8 @@
 #pragma once
 
 #include <Windows.h>
-#include "../shared/WinRingsConfig.h"
 
 namespace winrings::tools
 {
-    int RunSettingsDialog(HINSTANCE instance);
+    int RunTrayApp(HINSTANCE instance, bool openFlyoutOnStart);
 } // namespace winrings::tools

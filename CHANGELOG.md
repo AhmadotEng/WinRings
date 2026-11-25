@@ -2,6 +2,25 @@
 
 All notable changes to **WinRings** are documented in this file.
 
+## [v3.1.0] - 2026-11-25 (Release 3.1 — Multi-Profile Rings, Tray Control Flyout, Hidden Search Pins & Win-Chord Recovery)
+
+### Added
+- **Independent Direct2D Tray Control Flyout (`WinRingsTools.exe`, `src/tools/TrayApp.h/.cpp`):** Replaced the legacy multi-page `SettingsDialog` with an on-demand `376x544 DIP` Direct2D Tray Flyout (`Triggers`, `Profiles`, `Look`) positioned cleanly above the taskbar with zero-handle idle close, instant pause/resume toggle, real side-by-side `RingOverlay` preview, and surgical `WM_COPYDATA` live delta streaming (`src/shared/WinRingsDeltaIpc.h`).
+- **Multi-Profile Rings & Built-In `SMenu` (`src/shared/WinRingsConfig.h/.cpp`, `src/shell/SlotModel.cpp`):** Added config v6 schema with standalone per-profile JSON files under `%APPDATA%\WinRings\profiles\<id>.json`, a built-in **`SMenu`** Windows utility/power profile (Win+X tools arc, elevated CMD/PowerShell, Power arc, Settings & Control Panel), trigger-to-profile binding, and inline profile creation/editing.
+- **Unified Trigger Model & Live Shortcut Recorder (`src/shared/TriggerModel.h`, `src/shell/InputEngine.h/.cpp`):** Supports up to 8 configurable triggers (`MouseButton`, `RightLeftChord`, `KeyChord`, `SoloModifier` such as solo `Win` / `Alt` tap) with inline live shortcut capture and Windows conflict advisories.
+- **Honest Multi-Texture Engine & Free Color Tinting (`src/shared/RingThemeEngine.h`, `src/shell/RingOverlay.cpp`, `src/shell/AcrylicBackdrop.cpp`):** Runtime switching across `A4SAcrylic` (native WCA), `TaskbarGlass` (HostBackdrop `dwmcore`), and `PureMatte`, plus arbitrary `#RRGGBB` surface/accent tinting and `Auto System` light/dark & Windows accent sync.
+- **Inline Profile Customization & Unified Hidden Search Pins (`src/tools/TrayApp.cpp`, `src/shared/WinRingsConfig.h/.cpp`, `src/shell/SlotModel.h/.cpp`):** Added inline Direct2D forms inside **Profiles** for `+ Link / Cmd`, `+ New` profile, and pin **Edit** (**Display Name**, **Custom Icon** `Browse...`/`Reset`, **Hide from Ring (Search Only)** toggle, and **Run as Administrator**), keeping hidden pins searchable without taking visible Ring slots (with one-time migration of legacy `search.json`).
+- **Taskbar-Style Direct2D Right-Click Context Flyout (`src/shell/ContextFlyout.h/.cpp`, `src/shell/RingOverlay.cpp`, `src/shell/WindowTracker.cpp`):** Single-instance Direct2D popup menu with `End task` (safe non-OS process termination), `Close window`, `Run as administrator`, `Hide from ring (search only)`, and `Show on ring (unhide)` — moving rename/custom-icon UI off the Ring into `WinRingsTools.exe` for cleaner runtime performance.
+
+### Bug Fixes
+- **Windows `Win+<Key>` Shortcut Recovery While Ring Is Open (`src/shell/InputEngine.cpp`):** Pressing `Win+I`, `Win+R`, `Win+E`, `Win+Shift+S`, `Win+D`, `Win+L`, `Win+V`, `Win+X`, `Win+Tab`, `Win+Arrows`, `Win+1..9`, etc., while a `Win`-key profile Ring is open now dismisses the Ring and lets Windows execute the system shortcut cleanly instead of swallowing it.
+- **Single-Instance Context Flyout Repositioning (`src/shell/ContextFlyout.cpp`, `src/shell/RingOverlay.cpp`):** Repeatedly clicking/opening a pinned app menu now closes the previous popup cleanly and re-opens at the new cursor position instead of stacking multiple popups.
+- **Type-to-Search Auto-Selection & Ranking (`src/shared/SearchMatch.h`, `src/shell/SlotModel.h/.cpp`, `src/shell/RingOverlay.cpp`, `src/shared/SlotMatching.h`):** Separated primary identity aliases (`tiers 0..3`) from contextual secondary aliases (`tiers 4..7`: `Downloads` files, open window titles, parent folders) via `ScoreSlotAliases`, preventing `Downloads` files or open window titles from stealing auto-selection from hidden pins like `Handy` or polluting `excludeNames`; anchored pointer unlock to real cursor coordinates (`GetCursorPos`), preserved selection across deadzones (`ShouldKeepSearchSelectionOnPointer`), enabled search navigation with zero visible Ring slots, and refined the selected search-arc halo + rim.
+- **Safe Drag-to-Reorder Around Hidden Pins (`src/shared/SlotMatching.h`, `src/shell/RingOverlay.cpp`):** Mapped visible pinned slot indices via `MapVisiblePinnedIndexToConfigIndex` / `MapVisiblePinnedInsertPosToConfigIndex` so reordering visible Ring icons preserves hidden pins cleanly in `profiles\<id>.json`.
+- **Multi-DPI Pointer Glide & Previous-App Switching (`src/shell/WindowTracker.cpp`, `src/shared/RadialMath.h`):** Validated window bounds across multi-DPI monitors (`ResolveRestoredWindowRect`, `ComputeSafePointerGlideTarget`, `DWMWA_EXTENDED_FRAME_BOUNDS`) with immediate cancellation on manual pointer movement (`OnUserMouseMove` / `IsUserPointerOverride`), and improved double-tap previous window resolution (`ResolvePreviousSwitchTarget`).
+
+---
+
 ## [v3.0.0] - 2026-11-22 (Release 3.0 — Pure Radial Switcher & Interactive Drag-and-Drop)
 
 ### Added
