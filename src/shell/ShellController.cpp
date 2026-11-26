@@ -116,16 +116,24 @@ namespace winrings
             return path.substr(0, slash + 1) + fileName;
         }
 
-        void LaunchToolsExecutable(HMODULE mod, const std::wstring& args)
+        void RequestHostOpenSettings(HMODULE shellMod, HWND hostWindow, const std::wstring& fallbackArgs)
         {
-            const std::wstring exe = ResolveSiblingPath(mod, WINRINGS_TOOLS_FILENAME_W);
+            if (hostWindow && IsWindow(hostWindow))
+            {
+                if (const UINT ctrlMsg = RegisterWindowMessageW(WINRINGS_HOST_CONTROL_MESSAGE_W))
+                {
+                    if (PostMessageW(hostWindow, ctrlMsg, WINRINGS_HOST_CTRL_OPEN_UI, 0))
+                        return;
+                }
+            }
+            const std::wstring exe = ResolveSiblingPath(shellMod, WINRINGS_HOST_FILENAME_W);
             if (exe.empty())
                 return;
             std::wstring cmdLine = L"\"" + exe + L"\"";
-            if (!args.empty())
+            if (!fallbackArgs.empty())
             {
                 cmdLine.push_back(L' ');
-                cmdLine += args;
+                cmdLine += fallbackArgs;
             }
             STARTUPINFOW si{ sizeof(si) };
             PROCESS_INFORMATION pi{};
@@ -412,7 +420,7 @@ namespace winrings
 
                 RingOverlay::Callbacks overlayCb{};
                 overlayCb.launchTools = [this](const std::wstring& args) {
-                    LaunchToolsExecutable(m_shellModule, args);
+                    RequestHostOpenSettings(m_shellModule, m_hostWindow, args.empty() ? L"--open" : args);
                 };
                 overlayCb.saveAndReloadConfig = [this](const SwitcherConfig& updated) {
                     updated.Save();
@@ -445,6 +453,7 @@ namespace winrings
                 InputEngine::Callbacks inputCb{};
                 inputCb.isRingOpen = [this]() { return m_overlay.IsOpen(); };
                 inputCb.isRingLockedOpen = [this]() { return m_overlay.IsLockedOpen(); };
+                inputCb.isTrayPreviewOpen = [this]() { return m_overlay.IsOpenedForTrayPreview(); };
                 inputCb.isRingDragActive = [this]() { return m_overlay.IsDragOrReorderActive(); };
                 inputCb.isPointInOverlay = [this](POINT pt) { return m_overlay.IsPointInActiveBounds(pt); };
                 inputCb.getOverlayDpiScale = [this]() { return m_overlay.DpiScale(); };
@@ -647,23 +656,31 @@ namespace winrings
                             ? std::wstring(pkt.previewProfileId)
                             : m_activeProfileId;
                         const std::wstring targetProf = m_config.ResolveProfile(reqProf).id;
+                        const bool forTrayPreview = (pkt.intParam == 1);
+                        m_overlay.SetOpenedForTrayPreview(forTrayPreview);
                         if (!m_overlay.IsOpen())
                         {
                             const POINT pt = (pkt.anchorScreenX != 0 || pkt.anchorScreenY != 0)
                                 ? POINT{ pkt.anchorScreenX, pkt.anchorScreenY }
                                 : GetActiveMonitorCenterPhysical();
                             OpenRingAt(pt.x, pt.y, true, targetProf);
+                            m_overlay.SetOpenedForTrayPreview(forTrayPreview);
                         }
-                        else if (_wcsicmp(m_activeProfileId.c_str(), targetProf.c_str()) != 0)
+                        else
                         {
-                            m_activeProfileId = targetProf;
-                            m_overlay.SetActiveProfileId(m_activeProfileId);
-                            auto slots = SlotModel::BuildRingSlots(
-                                m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
-                            m_overlay.RefreshSlots(std::move(slots));
+                            if (_wcsicmp(m_activeProfileId.c_str(), targetProf.c_str()) != 0)
+                            {
+                                m_activeProfileId = targetProf;
+                                m_overlay.SetActiveProfileId(m_activeProfileId);
+                                auto slots = SlotModel::BuildRingSlots(
+                                    m_overlay.Hwnd(), m_config, m_tracker, m_tracker.WicFactory(), &m_appIndex, m_activeProfileId);
+                                m_overlay.RefreshSlots(std::move(slots));
+                            }
+                            if (pkt.anchorScreenX != 0 || pkt.anchorScreenY != 0)
+                                m_overlay.RepositionTo(pkt.anchorScreenX, pkt.anchorScreenY);
                         }
                         m_overlay.LockOpen();
-                        m_overlay.SetOpenedForTrayPreview(pkt.intParam == 1);
+                        m_overlay.SetOpenedForTrayPreview(forTrayPreview);
                     }
                     else
                     {

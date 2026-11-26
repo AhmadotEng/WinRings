@@ -4,6 +4,7 @@ build/bin/
 build/gen/
 build/stage/
 build/tests/
+build/release/
 work/
 *.obj
 *.pdb

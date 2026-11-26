@@ -1,4 +1,4 @@
-# WinRings — Improvement Ideas & Architecture Roadmap (v3.1+)
+# WinRings — Improvement Ideas & Architecture Roadmap (v4.1+)
 
 Concrete feature ideas, UX polish opportunities, and structural refactors to explore next while preserving WinRings's native C++17 performance and visual craft.
 
@@ -49,4 +49,4 @@ Concrete feature ideas, UX polish opportunities, and structural refactors to exp
 ## D. Scope Guardrails (Intentional Non-Goals)
 
 - **No taskbar or Start Menu hooks:** Windows taskbar modification belongs in ClearTop Taskbar, and Start Menu replacement belongs in A4S-Menu. WinRings stays purely focused on the Radial Switcher & Gesture workflow.
-- **Zero `.NET`/CLR & zero external converter binaries:** Keep the pure C++17 `/MT` static native build and lean 4-binary footprint intact.
+- **Zero `.NET`/CLR & zero external converter binaries:** Keep the pure C++17 `/MT` static native build and lean 2-runtime-binary + single-installer footprint intact.

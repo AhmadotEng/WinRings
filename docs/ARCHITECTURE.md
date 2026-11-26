@@ -1,6 +1,6 @@
-# WinRings — System Architecture & Module Reference (v3.1)
+# WinRings — System Architecture & Module Reference (v4.0.0)
 
-WinRings is a four-binary native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR) application integrating cleanly into Windows 11 `explorer.exe` while keeping the headless ring supervisor (`WinRingsHost.exe`), independent Tray Control Flyout (`WinRingsTools.exe`), and installer (`WinRingsSetup.exe`) cleanly decoupled.
+WinRings is a three-binary (two runtime binaries + single-file installer) pure native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR) application integrating cleanly into Windows 11 `explorer.exe` while keeping the Explorer supervisor, resident tray icon, on-demand Handy-style Settings UI (`WinRingsHost.exe`), and installer (`WinRingsSetup.exe`) out-of-process.
 
 ---
 
@@ -8,19 +8,17 @@ WinRings is a four-binary native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR
 
 ```mermaid
 flowchart LR
-    Setup["WinRingsSetup.exe<br/>(BCrypt SHA-256 Installer)"] -->|Extracts & Verifies| Host["WinRingsHost.exe<br/>(Headless Supervisor, CrashGuard, CLI)"]
+    Setup["WinRingsSetup.exe<br/>(BCrypt SHA-256 Installer)"] -->|Extracts & Verifies| Host["WinRingsHost.exe<br/>(Supervisor, Tray Icon & On-Demand Handy-Style UI)"]
     Setup -->|Extracts & Verifies| Shell["WinRingsShell.dll<br/>(Explorer In-Process Switcher)"]
-    Setup -->|Extracts & Verifies| Tools["WinRingsTools.exe<br/>(Independent Tray Icon + 376x524 Control Flyout)"]
 
     Host -->|CreateRemoteThread + LoadLibraryW| Shell
-    Host <-->|Registered Messages + Attempt Cookie| Shell
-    Tools -->|Surgical WM_COPYDATA Deltas + Live Ring Preview| Host
+    Host <-->|Direct Single-Hop Messages + WM_COPYDATA| Shell
 ```
 
-### Why Separate Binaries?
-1. **Headless `WinRingsHost.exe` + Independent `WinRingsTools.exe` Tray:** `WinRingsHost.exe` runs silently with zero UI or tray footprint in its own process, and automatically ensures `WinRingsTools.exe --tray` is started on normal launch (pass `--no-tray` for headless/automated runs). `WinRingsTools.exe` (`--tray` / `--open` / `--quit`) owns the system tray icon and on-demand `376x544 DIP` Direct2D Control Flyout (`Triggers`, `Profiles`, `Search`, `Look`) positioned above the taskbar, destroying its flyout `HWND` and all D3D/D2D COM handles when closed and quitting cleanly (`--quit`) without disturbing the Ring engine.
+### Combined Host + Zero-Resource Hidden Mode
+1. **Single Combined `WinRingsHost.exe`:** Owns the headless Explorer supervisor, the resident blue interlocking twin-ring tray icon, and the on-demand `840x560 DIP` Handy-style Direct2D Settings window (`SettingsWindow.cpp` — **General**, **Appearance**, and unified **Profiles** sidebar with embedded `winrings_logo.png` sticker wordmark and clickable bottom-left status pill). Passing `--no-tray` runs strictly headless, while closing (`X`) the Settings window destroys its `HWND`, releases all D3D11/DXGI/Direct2D/DirectWrite/WIC GPU resources, and trims process working set memory so idle tray usage stays at `0%` GPU / minimal RAM.
 2. **Crash-loop safety (`CrashGuard`):** `WinRingsHost.exe` monitors `explorer.exe` via `MsgWaitForMultipleObjectsEx`. If `explorer.exe` exits abnormally **3 times within 180 seconds** (`kCrashLoopThreshold = 3`, `kCrashLoopWindow100ns` in `src/shared/CrashGuard.h`), `WinRingsHost.exe` writes `InjectionDisabled = 1` under `HKCU\Software\WinRings\HostSafety` and halts future injection until `--reset-safety`.
-3. **Resilient recovery:** Receiving `TaskbarCreated` re-injects `WinRingsShell.dll` automatically if `explorer.exe` restarted, while `WinRingsTools.exe` re-registers its cyan ring tray icon independently.
+3. **Resilient recovery:** Receiving `TaskbarCreated` re-injects `WinRingsShell.dll` automatically if `explorer.exe` restarted and re-registers the tray icon cleanly.
 
 ---
 
@@ -32,12 +30,11 @@ Defined in `src/shared/WinRingsIdentity.h`, `src/shared/WinRingsApi.h`, and `src
 - **Cryptographic attempt cookie:** Generated via `SystemFunction036` (`RtlGenRandom`) and stored on `WinRings.Host.Window.v1` property `WinRings.Host.AttemptCookie.v1`.
 - **Reattach support:** If the exact `WinRingsShell.dll` path is already loaded in `explorer.exe`, `WinRingsHost` sends `WINRINGS_CMD_REATTACH` rather than loading a second instance.
 - **Lock / RDP / UAC suppression:** `WinRingsHost.cpp` uses `WTSRegisterSessionNotification` + `EVENT_SYSTEM_DESKTOPSWITCH` to send `WINRINGS_CMD_SUSPEND_INPUT` on lock/RDP/secure desktop transitions and `WINRINGS_CMD_REFRESH_INPUT` on unlock (preserving user pause state).
-- **Surgical `WM_COPYDATA` Delta IPC (`WINRINGS_COPYDATA_DELTA_V1`):** `WinRingsTools.exe` sends `WinRingsDeltaPacket` (`SetLook`, `SetGestures`, `SetTriggers`, `PreviewLiveRing`, `FlushSaveToDisk`, `SetRingPaused`) directly through `WinRingsHost.exe` (or `WinRings.Preview.Control.v1` in `--preview`) to `ShellController` in memory—zero `config.json` re-parsing per slider/color/shortcut change; atomic save runs once when the Flyout closes.
+- **Direct Single-Hop `WM_COPYDATA` Delta IPC (`WINRINGS_COPYDATA_DELTA_V1`):** `SettingsWindow.cpp` inside `WinRingsHost.exe` sends `WinRingsDeltaPacket` (`SetLook`, `SetGestures`, `SetTriggers`, `PreviewLiveRing`, `FlushSaveToDisk`, `SetRingPaused`) directly to `ShellController` in memory (or `WinRings.Preview.Control.v1` in `--preview`) — zero intermediate relay and zero `config.json` re-parsing per slider/color/shortcut change; atomic save runs once when the Settings window closes.
 
 ### Registered Messages & Commands
-- **Host Control (`WinRings.Host.Control.v1`):** `TOGGLE (1)`, `EXIT (2)`, `STATUS (3)`, `RELOAD (4)`, `RESET_SAFETY (5)`, `QUERY_DETAILS (7)`, `SET_PAUSED (8)`.
+- **Host Control (`WinRings.Host.Control.v1`):** `TOGGLE (1)`, `EXIT (2)`, `STATUS (3)`, `RELOAD (4)`, `RESET_SAFETY (5)`, `QUERY_DETAILS (7)`, `SET_PAUSED (8)`, `OPEN_UI (9)`.
 - **Shell Command (`WinRings.Shell.Command.v1`):** `TOGGLE_RING (1)`, `EXIT (2)`, `SUSPEND_INPUT (3)`, `REFRESH_INPUT (4)`, `RELOAD_CONFIG (5)`, `QUERY_SHELL_STATE (7)` (`WINRINGS_STATE_RING_READY = 1 << 0`, `WINRINGS_STATE_RING_PAUSED = 1 << 1`), `REATTACH (0xFFFF)`.
-- **Tray Wake (`WinRings.Tray.Wake.v1`):** `1` open Flyout, `2` quit Tray process (`--quit`).
 - **Shell Status (`WinRings.Shell.Status.v1`):** `READY (1)`, `FAILED (2)`, `DISARMED (3)`.
 - **Exports (`src/shell/WinRingsShell.def`):** Exclusively `WinRings_GetApi` (`WINRINGS_ABI_VERSION = 0x00010000`) and `WinRings_RunPreview` (used by `--preview` outside `explorer.exe`). Zero COM class factory exports, zero taskbar/XAML hooks.
 
@@ -48,7 +45,8 @@ Defined in `src/shared/WinRingsIdentity.h`, `src/shared/WinRingsApi.h`, and `src
 ### `src/shared/` — Header-Only Pure Logic & Shared Config
 | File | Responsibility |
 | :--- | :--- |
-| `WinRingsIdentity.h` | Product strings, mutexes (`Host`, `Tray`, `Setup`), window classes, message names, version constants |
+| `WinRingsIdentity.h` | Product strings, mutexes (`Host`, `Setup`), window classes, message names, version constants |
+| `SettingsLayoutMath.h` | Pure preview-stage visibility gating, stage-center physical coordinate math, preview-clamp bounds, active `SetWindowRgn` hit-region math (`ComputePreviewOverlayHitRadiusDip`, `ShouldClipOverlayToActiveRegion`, `IsRingSlotPressWithinOuterRadius`), sidebar hover & unified card growth (`ResolveSidebarIconHoverAlpha`, `ComputeUnifiedProfilesCardBottomDip`), and footer/profile action predicates (`ShouldFooterStatusClickTogglePause`, `ShouldShowProfileDeleteAction`) |
 | `WinRingsApi.h` | Host/Shell command enums, status/pause bits, C ABI (`WinRingsApi`, `WinRings_GetApi`, `WinRings_RunPreview`) |
 | `WinRingsDeltaIpc.h` | POD `WinRingsDeltaPacket` (`WM_COPYDATA`), `ApplyDeltaToConfig`, registry System Light/Dark & Accent resolvers |
 | `TriggerModel.h` | Unified `TriggerBinding` (`MouseButton`, `RightLeftChord`, `KeyChord`, `SoloModifier`, `profileId`), key formatting, conflict analyzer |
@@ -73,18 +71,17 @@ Defined in `src/shared/WinRingsIdentity.h`, `src/shared/WinRingsApi.h`, and `src
 | `SlotModel.h/.cpp` | Merges `pinnedSlots` with live `AppWindowGroup`s, custom `iconCacheFile` override loading, newest Downloads/Folder files, launches apps/URLs, `FO_COPY` folder drops, Recycle Bin ops, cookie-free WinHTTP favicon downloader (`%APPDATA%\WinRings\icons\`) |
 | `AppIndex.h/.cpp` | Background Start Menu `.lnk` + `shell:AppsFolder` indexer, PE friendly-name lookup, search query executor |
 
-### `src/host/`, `src/tools/`, `src/setup/`
+### `src/host/`, `src/setup/`
 | File | Responsibility |
 | :--- | :--- |
-| `src/host/WinRingsHost.cpp` | Headless single-instance supervisor, Explorer injection loop, `CrashGuard` Registry persistence, WTS session watch, `WM_COPYDATA` delta bridge, CLI forwarder |
-| `src/tools/WinRingsTools.cpp` | Entry point parsing `--tray`, `--open`, `--quit`, `--version`, single-instance tray wake |
-| `src/tools/TrayApp.h/.cpp` | Resident cyan tray icon + on-demand `376x544 DIP` Direct2D Control Flyout (`Triggers`, `Profiles`, `Look`) cleared above the taskbar, inline Direct2D link/command/profile/pin-edit forms (including `Hide from Ring (Search Only)`), temporary live shortcut recorder, real side-by-side Ring preview, zero-handle idle close |
-| `src/setup/WinRingsSetup.cpp` | Single-file installer (`RT_RCDATA` payloads verified with `BCrypt` SHA-256), installs to `%LOCALAPPDATA%\WinRings\v1.0.0.0\`, registers both `WinRings` (Host) and `WinRingsTray` (`--tray`) Run keys + Start Menu shortcut |
+| `src/host/WinRingsHost.cpp` | Single combined app: Explorer injection loop, `CrashGuard` Registry persistence, WTS session watch, `WM_COPYDATA` delta bridge, CLI dispatcher (`--open`, `--settings`, `--no-tray`, `--preview`, `--exit`) |
+| `src/host/SettingsWindow.h/.cpp` | Resident blue twin-ring tray icon + on-demand `840x560 DIP` Handy-style Direct2D Settings window (`General`, `Appearance` with palette icon, unified expandable `Profiles` sidebar with `+`/rename/reset/delete, embedded `winrings_logo.png` RCDATA logo, clickable corner `Active`/`Paused` pill, reserved live-Ring stage, zero-GPU destroy-on-close & working-set trim) |
+| `src/setup/WinRingsSetup.cpp` | Single-file installer (`RT_RCDATA` payloads verified with `BCrypt` SHA-256), installs `WinRingsHost.exe` + `WinRingsShell.dll` to `%LOCALAPPDATA%\WinRings\v1.0.0.0\`, cleans legacy `WinRingsTools.exe` / `WinRingsTray`, registers `WinRings` Run key + Start Menu shortcut (`--open`) |
 
 ---
 
 ## 4. Runtime Data Flows & Boundary Guarantee
 
 - **Opening & Slot Assembly:** On trigger (`InputEngine`), `ShellController` asks `SlotModel::BuildRingSlots()` to merge configured `pinnedSlots` with live `WindowTracker::EnumerateGroupedWindows()` up to `maxSlots`.
-- **Live Tray Sync Flow:** Clicking the Tray Icon opens `WinRings.TrayFlyout.v1` from `%APPDATA%\WinRings\config.json` and `profiles\*.json` (picking up any Ring-side pin/reorder/admin/hide edits). Switching to **Look** or **Profiles** sends `DeltaOp::PreviewLiveRing(1)` to show the real `RingOverlay` side-by-side; slider, texture, color, or shortcut changes send `WINRINGS_COPYDATA_DELTA_V1` packets straight into `ShellController`'s memory; clicking `Open "<Name>" on Ring` sends `MakeOpenProfileForEditDelta` (`intParam = 2`) so the Ring stays open for direct drag-and-drop editing even after the Flyout closes; inline pin edits (`Hide from Ring (Search Only)`, rename, custom icon, Run as Administrator) or right-clicking Ring items (`Hide from ring (search only)`) trigger immediate disk reload (`MakeReloadFromDiskDelta`); closing the Flyout sends `FlushSaveToDisk` once and releases all Flyout COM/HWND handles.
+- **Combined Tray & Stage Sync Flow:** Left-clicking the Tray Icon opens `WinRings.SettingsWindow.v1` directly inside `WinRingsHost.exe` from `%APPDATA%\WinRings\config.json` and `profiles\*.json`. **General** hides the Ring; switching to **Profiles** or **Appearance** sends `DeltaOp::PreviewLiveRing(1)` with `ComputeRingStageCenterPhysical` so the real `RingOverlay` (`HWND_TOPMOST`) aligns cleanly inside the window's reserved stage and follows window moves/minimization/focus automatically. Closing (`X`) the window sends `FlushSaveToDisk` once, destroys the window + D3D/D2D COM objects, and trims working set memory.
 - **Independent Companion Boundary:** WinRings never hooks `Taskbar.dll`, `SystemTray.dll`, or XAML visual diagnostics, leaving taskbar and Start Menu customization strictly to separate host processes.

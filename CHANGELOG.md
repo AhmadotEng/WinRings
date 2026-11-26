@@ -2,6 +2,28 @@
 
 All notable changes to **WinRings** are documented in this file.
 
+## [v4.0.0] - 2026-11-26 (Release 4.0 — Unified Native App, Rebuilt Handy-Style Settings UI & Cross-Process Hit-Region Engine)
+
+### Added & Redesigned
+- **Single Combined `WinRingsHost.exe` Architecture (Zero Separate Helper App):** Merged the resident Tray icon and Settings UI directly into `WinRingsHost.exe` (`src/host/SettingsWindow.h/.cpp`, `src/host/WinRingsHost.cpp`), deleting `src/tools/` (`WinRingsTools.exe`, `TrayApp.h/.cpp`) and simplifying `WinRingsSetup.exe` to embed and verify just **2 runtime binaries** (`WinRingsHost.exe` + `WinRingsShell.dll`) while automatically cleaning up legacy `WinRingsTools.exe` / `WinRingsTray` Startup entries.
+- **Rebuilt Handy-Style Native Direct2D Settings Window (`src/host/SettingsWindow.cpp`, `src/shared/SettingsLayoutMath.h`):**
+  - **Custom WinRings Sticker Logo & Blue Twin-Ring Tray Icon:** Replaced the old single-dot tray icon with interlocking gradient-blue twin rings (`CreateWinRingsTrayIcon`) and embedded the crisp vector-style `winrings_logo.png` sticker wordmark (`RT_RCDATA 201`, loaded via WIC into Direct2D on open and released on close).
+  - **Clean 3-Tab Sidebar (`General`, `Appearance`, `Profiles`):** Neutral dark-gray selection pills, standard artist-palette icon on **Appearance**, and a **unified expandable `Profiles` sidebar container** that stays hidden at rest, highlights cleanly on hover without flicker (`hoverProfilesCard`), wraps `default`, `SMenu`, and newly created profiles dynamically in one card (`ComputeUnifiedProfilesCardBottomDip`), and reveals dull-until-near **`+`** (create profile) and **box-and-pen** (inline rename profile) icons (`ResolveSidebarIconHoverAlpha`).
+  - **Streamlined Profiles Tab & Universal Reset:** Cleaned up the Profiles column with the active profile header, **`Config`** button, red-on-hover **Reset** icon available on **every** profile (`default`, `SMenu`, and custom profiles), red-on-hover **Delete** trash icon for custom profiles (`ShouldShowProfileDeleteAction`), an `Include Running Apps` card, and a spacious `PINNED ITEMS` card containing `+ App / File`, `+ Folder`, and `+ Link / Cmd` above a taller scrollable pin list.
+  - **One-Click Corner Pause & Zero-GPU Idle:** Removed the separate footer Pause button and made the bottom-left **`● Active` / `● Paused`** status pill directly clickable (`ShouldFooterStatusClickTogglePause`). Closing (`X`) the Settings window destroys the `HWND`, releases all D3D11/D2D1/WIC GPU objects, and trims working-set memory (`0%` GPU idle).
+  - **Direct Live Ring Over Reserved Stage (`RepositionTo`):** Opening **Appearance** or **Profiles** displays the real `RingOverlay` (`HWND_TOPMOST`) aligned directly over the Settings window's reserved preview stage, smoothly tracking window moves, DPI changes, minimization, and focus via single-hop `WM_COPYDATA` delta IPC (`WINRINGS_HOST_CTRL_OPEN_UI`).
+- **Pure Layout & Hit-Region Unit Tests (`src/shared/SettingsLayoutMath.h`, `tests/WinRingsTests.cpp`):** Added `TestSettingsStageAndPreviewMath` covering stage visibility, physical center calculation, monitor clamping, active overlay hit-region radius & gating, outer-radius slot-press bounds, sidebar hover alphas, unified profile container growth, footer pause toggle, and delete-action gating.
+
+### Bug Fixes
+- **Fixed Unable to Drag Settings Window While Live Ring Preview Was Visible (`src/shell/RingOverlay.h/.cpp`, `src/shared/SettingsLayoutMath.h`):** Replaced ineffective cross-process `WM_NCHITTEST` (`HTTRANSPARENT`) / non-layered `WS_EX_TRANSPARENT` passthrough on `WS_EX_NOREDIRECTIONBITMAP` with kernel-enforced `SetWindowRgn` clipping (`RingOverlay::UpdateOverlayHitRegion()`) fitted around the active Ring (`outerRadius + 28 DIP`) plus any open submenu/search rects (`+ 24 DIP`), freeing the Settings title bar, window buttons, and left controls cross-process while preserving live Ring tracking during window drags.
+- **Fixed Partial-Overlap Re-Trigger Freeze & Unbounded `WM_LBUTTONDOWN` Capture (`src/shell/RingOverlay.cpp`, `src/shared/SettingsLayoutMath.h`):**
+  - Enabled active `SetWindowRgn` clipping whenever the Ring is open and not actively dragging/reordering (`ShouldClipOverlayToActiveRegion`), preventing manually re-triggering the Ring partially over the Settings window from reopening an unclipped `760 × 760 DIP` blocking surface.
+  - Guarded `WM_LBUTTONDOWN` slot capture with `IsRingSlotPressWithinOuterRadius(dist, deadzoneDip, outerRadius)` so clicks in transparent padding outside the Ring can never hijack `SetCapture(m_hwnd)` or freeze hover/drag interactions.
+- **Eliminated Sidebar Profiles Hover Flicker (`src/host/SettingsWindow.cpp`):** Unified hover detection across `lo.sidebarProfilesCard` so crossing inter-row gaps between `Profiles`, `default`, and `SMenu` never drops hover or flashes individual icons off/on.
+- **Prevented Ring Keyboard/Scroll Hijacking While Editing in Settings (`src/shell/InputEngine.h/.cpp`, `src/shell/ShellController.cpp`):** Added `isTrayPreviewOpen` gating in `InputEngine` so typing inside Settings inline forms (`New Profile`, `Rename`, `Add Link`, `Edit Pin`) and scrolling Settings lists never get swallowed by the live Ring preview.
+
+---
+
 ## [v3.1.0] - 2026-11-25 (Release 3.1 — Multi-Profile Rings, Tray Control Flyout, Hidden Search Pins & Win-Chord Recovery)
 
 ### Added

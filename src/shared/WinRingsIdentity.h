@@ -7,7 +7,6 @@
 #define WINRINGS_PRODUCT_NAME_A             "WinRings"
 #define WINRINGS_HOST_FILENAME_W            L"WinRingsHost.exe"
 #define WINRINGS_SHELL_FILENAME_W           L"WinRingsShell.dll"
-#define WINRINGS_TOOLS_FILENAME_W           L"WinRingsTools.exe"
 #define WINRINGS_SETUP_FILENAME_W           L"WinRingsSetup.exe"
 
 #define WINRINGS_HOST_WINDOW_CLASS_W        L"WinRings.Host.Window.v1"
@@ -17,10 +16,7 @@
 #define WINRINGS_THUMBCARD_CLASS_W          L"WinRings.ThumbCard.v1"
 
 #define WINRINGS_HOST_MUTEX_W               L"Local\\WinRings.Host.Instance.v1"
-#define WINRINGS_TRAY_MUTEX_W               L"Local\\WinRings.Tray.Instance.v1"
 #define WINRINGS_SETUP_MUTEX_W              L"Local\\WinRings.Setup.Instance.v1"
-#define WINRINGS_TRAY_WINDOW_CLASS_W        L"WinRings.Tray.Window.v1"
-#define WINRINGS_TRAY_WAKE_MESSAGE_W        L"WinRings.Tray.Wake.v1"
 #define WINRINGS_HOST_ATTEMPT_COOKIE_PROP_W L"WinRings.Host.AttemptCookie.v1"
 #define WINRINGS_HOST_SAFETY_REGISTRY_W     L"Software\\WinRings\\HostSafety"
 #define WINRINGS_HOST_SAFETY_MUTEX_PREFIX_W L"Global\\WinRings.HostSafety.v1."

@@ -23,7 +23,6 @@ $vcvars = @(
 $stagedFiles = @(
     "$root\build\stage\WinRings\WinRingsHost.exe",
     "$root\build\stage\WinRings\WinRingsShell.dll",
-    "$root\build\stage\WinRings\WinRingsTools.exe",
     "$root\build\stage\WinRingsSetup\WinRingsSetup.exe"
 )
 
@@ -56,7 +55,6 @@ Write-Host '  OK: WinRings_GetApi & WinRings_RunPreview verified'
 Write-Host '==> [3/5] Checking --version exit codes'
 foreach ($exe in @(
     "$root\build\stage\WinRings\WinRingsHost.exe",
-    "$root\build\stage\WinRings\WinRingsTools.exe",
     "$root\build\stage\WinRingsSetup\WinRingsSetup.exe"
 )) {
     $p = Start-Process -FilePath $exe -ArgumentList '--version' -Wait -PassThru -NoNewWindow

@@ -21,7 +21,6 @@ $dirs = @(
     "$root\build\obj\tests",
     "$root\build\obj\shell",
     "$root\build\obj\host",
-    "$root\build\obj\tools",
     "$root\build\obj\setup",
     "$root\build\bin",
     "$root\build\gen",
@@ -52,7 +51,7 @@ function Invoke-VcBat([string]$ScriptBody, [string]$Tag) {
 $cflags = '/nologo /std:c++17 /O2 /MT /EHsc /W4 /WX /guard:cf /Brepro /utf-8 /DUNICODE /D_UNICODE'
 $lflags = '/CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /GUARD:CF /Brepro'
 
-Write-Host '==> [1/5] Building WinRingsTests.exe'
+Write-Host '==> [1/4] Building WinRingsTests.exe'
 $bat1 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
@@ -60,7 +59,7 @@ cl $cflags /Fo"$root\build\obj\tests\\" "$root\src\shared\WinRingsConfig.cpp" "$
 "@
 Invoke-VcBat $bat1 'tests'
 
-Write-Host '==> [2/5] Building WinRingsShell.dll'
+Write-Host '==> [2/4] Building WinRingsShell.dll'
 $bat2 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
@@ -69,54 +68,42 @@ cl $cflags /DWINRINGS_SHELL_EXPORTS /Fo"$root\build\obj\shell\\" "$root\src\shar
 "@
 Invoke-VcBat $bat2 'shell'
 
-Write-Host '==> [3/5] Building WinRingsHost.exe'
+Write-Host '==> [3/4] Building WinRingsHost.exe'
 $bat3 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 rc /nologo /fo "$root\build\obj\host\WinRingsHost.res" "$root\src\host\WinRingsHost.rc" || exit /b 1
-cl $cflags /Fo"$root\build\obj\host\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\host\WinRingsHost.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\host\WinRingsHost.manifest" $lflags /OUT:"$root\build\bin\WinRingsHost.exe" "$root\build\obj\host\WinRingsHost.res" user32.lib shell32.lib advapi32.lib wtsapi32.lib bcrypt.lib shlwapi.lib ole32.lib || exit /b 1
+cl $cflags /Fo"$root\build\obj\host\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\host\SettingsWindow.cpp" "$root\src\host\WinRingsHost.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\host\WinRingsHost.manifest" $lflags /OUT:"$root\build\bin\WinRingsHost.exe" "$root\build\obj\host\WinRingsHost.res" d3d11.lib d2d1.lib dwrite.lib dxgi.lib dxguid.lib dwmapi.lib comctl32.lib comdlg32.lib uxtheme.lib user32.lib gdi32.lib shell32.lib advapi32.lib wtsapi32.lib bcrypt.lib shlwapi.lib ole32.lib windowscodecs.lib || exit /b 1
 "@
 Invoke-VcBat $bat3 'host'
 
-Write-Host '==> [4/5] Building WinRingsTools.exe'
-$bat4 = @"
-@echo off
-call "$vcvars" >nul || exit /b 1
-rc /nologo /fo "$root\build\obj\tools\WinRingsTools.res" "$root\src\tools\WinRingsTools.rc" || exit /b 1
-cl $cflags /Fo"$root\build\obj\tools\\" "$root\src\shared\WinRingsConfig.cpp" "$root\src\tools\TrayApp.cpp" "$root\src\tools\WinRingsTools.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\tools\WinRingsTools.manifest" $lflags /OUT:"$root\build\bin\WinRingsTools.exe" "$root\build\obj\tools\WinRingsTools.res" d3d11.lib d2d1.lib dwrite.lib dxgi.lib dxguid.lib dwmapi.lib windowscodecs.lib comctl32.lib comdlg32.lib shell32.lib shlwapi.lib ole32.lib uxtheme.lib user32.lib gdi32.lib advapi32.lib || exit /b 1
-"@
-Invoke-VcBat $bat4 'tools'
-
-Write-Host '==> [5/5] Generating SHA-256 payload manifest & building WinRingsSetup.exe'
+Write-Host '==> [4/4] Generating SHA-256 payload manifest & building WinRingsSetup.exe'
 $hashHost  = (Get-FileHash -Algorithm SHA256 "$root\build\bin\WinRingsHost.exe").Hash.ToLowerInvariant()
 $hashShell = (Get-FileHash -Algorithm SHA256 "$root\build\bin\WinRingsShell.dll").Hash.ToLowerInvariant()
-$hashTools = (Get-FileHash -Algorithm SHA256 "$root\build\bin\WinRingsTools.exe").Hash.ToLowerInvariant()
 
 $header = @"
 #pragma once
 
 #define IDR_PAYLOAD_HOST  101
 #define IDR_PAYLOAD_SHELL 102
-#define IDR_PAYLOAD_TOOLS 103
 
 inline constexpr wchar_t kHashWinRingsHost[]  = L"$hashHost";
 inline constexpr wchar_t kHashWinRingsShell[] = L"$hashShell";
-inline constexpr wchar_t kHashWinRingsTools[] = L"$hashTools";
 "@
 [System.IO.File]::WriteAllText("$root\build\gen\payload_hashes.h", $header, [System.Text.Encoding]::UTF8)
 
-$bat5 = @"
+$bat4 = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 rc /nologo /fo "$root\build\obj\setup\WinRingsSetup.res" "$root\src\setup\WinRingsSetup.rc" || exit /b 1
 cl $cflags /Fo"$root\build\obj\setup\\" "$root\src\setup\WinRingsSetup.cpp" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"$root\src\setup\WinRingsSetup.manifest" $lflags /OUT:"$root\build\bin\WinRingsSetup.exe" "$root\build\obj\setup\WinRingsSetup.res" bcrypt.lib comctl32.lib shell32.lib shlwapi.lib ole32.lib dwmapi.lib uxtheme.lib user32.lib gdi32.lib advapi32.lib || exit /b 1
 "@
-Invoke-VcBat $bat5 'setup'
+Invoke-VcBat $bat4 'setup'
 
 Write-Host '==> Staging deliverables'
+Remove-Item -Force "$root\build\bin\WinRingsTools.exe","$root\build\stage\WinRings\WinRingsTools.exe" -ErrorAction SilentlyContinue
 Copy-Item -Force "$root\build\bin\WinRingsHost.exe"  "$root\build\stage\WinRings\WinRingsHost.exe"
 Copy-Item -Force "$root\build\bin\WinRingsShell.dll" "$root\build\stage\WinRings\WinRingsShell.dll"
-Copy-Item -Force "$root\build\bin\WinRingsTools.exe" "$root\build\stage\WinRings\WinRingsTools.exe"
 Copy-Item -Force "$root\build\bin\WinRingsSetup.exe" "$root\build\stage\WinRingsSetup\WinRingsSetup.exe"
 
 Write-Host 'Build-WinRings: SUCCEEDED'

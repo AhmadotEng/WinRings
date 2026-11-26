@@ -1,4 +1,4 @@
-# WinRings — Building, Verification & Diagnostics (v3.0.0)
+# WinRings — Building, Verification & Diagnostics (v4.0.0)
 
 Zero-external-dependency MSVC C++17 (`x64`) build and verification pipeline.
 
@@ -18,20 +18,18 @@ Zero-external-dependency MSVC C++17 (`x64`) build and verification pipeline.
 powershell -ExecutionPolicy Bypass -File .\tools\Build-WinRings.ps1
 ```
 
-Compiles 5 targets cleanly and writes staged outputs under `build\stage\`:
+Compiles 4 targets cleanly and writes staged outputs under `build\stage\`:
 
 | Stage | Output | Inputs / Packaging Notes |
 | :--- | :--- | :--- |
-| **`[1/5]`** | `build\tests\WinRingsTests.exe` | Links `WinRingsConfig.cpp` + `tests\WinRingsTests.cpp` (`/SUBSYSTEM:CONSOLE`). |
-| **`[2/5]`** | `build\bin\WinRingsShell.dll` | Links `WinRingsConfig.cpp` + all `src\shell\*.cpp` + `WinRingsShell.def` (`D3D11`, `D2D1`, `DWrite`, `DComp`, `DXGI`, `Dwmapi`, `WIC`, `WinHTTP`, `UxTheme`, `WindowsApp`). |
-| **`[3/5]`** | `build\bin\WinRingsHost.exe` | Links `WinRingsConfig.cpp` + `WinRingsHost.cpp` + `WinRingsHost.manifest` (`Wtsapi32`, `Bcrypt`). |
-| **`[4/5]`** | `build\bin\WinRingsTools.exe` | Links `WinRingsConfig.cpp` + `TrayApp.cpp` + `WinRingsTools.cpp` + `WinRingsTools.manifest`. |
-| **`[5/5]`** | `build\bin\WinRingsSetup.exe` | Computes SHA-256 digests of `WinRingsHost.exe`, `WinRingsShell.dll`, and `WinRingsTools.exe` into `build\gen\payload_hashes.h`, embeds all 3 binaries as `RT_RCDATA` (`101`, `102`, `103`), and links `WinRingsSetup.cpp`. |
+| **`[1/4]`** | `build\tests\WinRingsTests.exe` | Links `WinRingsConfig.cpp` + `tests\WinRingsTests.cpp` (`/SUBSYSTEM:CONSOLE`). |
+| **`[2/4]`** | `build\bin\WinRingsShell.dll` | Links `WinRingsConfig.cpp` + all `src\shell\*.cpp` + `WinRingsShell.def` (`D3D11`, `D2D1`, `DWrite`, `DComp`, `DXGI`, `Dwmapi`, `WIC`, `WinHTTP`, `UxTheme`, `WindowsApp`). |
+| **`[3/4]`** | `build\bin\WinRingsHost.exe` | Links `WinRingsConfig.cpp` + `SettingsWindow.cpp` + `WinRingsHost.cpp` + `WinRingsHost.rc` (embeds `winrings_logo.png` as `RT_RCDATA 201`) + `WinRingsHost.manifest` (`D3D11`, `D2D1`, `DWrite`, `DXGI`, `Dwmapi`, `UxTheme`, `ComDlg32`, `Wtsapi32`, `Bcrypt`, `Windowscodecs`). |
+| **`[4/4]`** | `build\bin\WinRingsSetup.exe` | Computes SHA-256 digests of `WinRingsHost.exe` and `WinRingsShell.dll` into `build\gen\payload_hashes.h`, embeds both binaries as `RT_RCDATA` (`101`, `102`), and links `WinRingsSetup.cpp`. |
 
 Staged deliverables:
 - `build\stage\WinRings\WinRingsHost.exe`
 - `build\stage\WinRings\WinRingsShell.dll`
-- `build\stage\WinRings\WinRingsTools.exe`
 - `build\stage\WinRingsSetup\WinRingsSetup.exe`
 
 ---
@@ -44,9 +42,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-WinRingsProduct.ps1
 
 Must finish with **`Test-WinRingsProduct: ALL CHECKS PASSED`** across all 5 automated checks:
 
-1. **PE Architecture & Zero `.NET`/CLR Check:** Runs `dumpbin /headers` (`8664 machine (x64)`) and `dumpbin /imports` (rejects `mscoree`, `clr.dll`, `coreclr`, `hostfxr`, `hostpolicy`, `System.Runtime`) across all 4 staged deliverables.
+1. **PE Architecture & Zero `.NET`/CLR Check:** Runs `dumpbin /headers` (`8664 machine (x64)`) and `dumpbin /imports` (rejects `mscoree`, `clr.dll`, `coreclr`, `hostfxr`, `hostpolicy`, `System.Runtime`) across all 3 staged deliverables.
 2. **DLL Export Audit:** Confirms `WinRingsShell.dll` exports `WinRings_GetApi` and `WinRings_RunPreview` cleanly.
-3. **CLI `--version` Smoke Check:** Verifies exit code `0` for `WinRingsHost.exe`, `WinRingsTools.exe`, and `WinRingsSetup.exe`.
+3. **CLI `--version` Smoke Check:** Verifies exit code `0` for `WinRingsHost.exe` and `WinRingsSetup.exe`.
 4. **ABI Probe (`build\tests\WinRingsAbiProbe.exe`):** Loads `WinRingsShell.dll` outside `explorer.exe`, confirms `WinRings_GetApi(0xDEADBEEF) == nullptr`, validates `WINRINGS_ABI_VERSION`, `cbSize`, `productVersion`, `RequestShutdown`, and `WinRings_RunPreview`.
 5. **Unit Test Suite (`WinRingsTests.exe` -> `WinRingsTests: ALL PASSED`):**
    - `TestRadialMath` — Sector anchors, `18 DIP` deadzone, outer-arc symmetry, hover corridors, DPI clamping, scroll wrapping.
@@ -58,21 +56,20 @@ Must finish with **`Test-WinRingsProduct: ALL CHECKS PASSED`** across all 5 auto
    - `TestTriggerModelAndDeltaIpc` — Key normalization (`RWin`/`RAlt`/`RCtrl`/`RShift`), `FormatTriggerBinding`, `AnalyzeTriggerConflict` notes, and surgical `ApplyDeltaToConfig` updates preserving `pinnedSlots`.
    - `TestSlotMatchingAndPreviews` — Explorer path detection, Downloads/Recycle Bin matching, PiP gating strictly on `SlotKind::App`.
    - `TestDragSpringAndReorder` — `500 ms` dwell + `420 ms` double-heartbeat pulse curve, reorder target clamping, vector element rotation.
+   - `TestHiddenPinsSearchAndReorderMapping` — Hidden search-only pin visibility, primary vs. secondary alias ranking, search selection persistence, and visible-to-config reorder mapping.
+   - `TestSettingsStageAndPreviewMath` — Tab preview visibility (`General`/`Appearance`/`Profiles`), DPI stage-center calculation, preview clamping, active `SetWindowRgn` hit-region clipping, `WM_LBUTTONDOWN` outer-radius press guard, sidebar hover alphas, unified profile container height, footer status toggle, and profile delete-action gating.
 
 ---
 
 ## 4. Safe Interactive & Live Testing
 
-### Non-Injecting Preview & Tray Flyout (Recommended During Development)
+### Non-Injecting Preview & Settings Window (Recommended During Development)
 ```powershell
 # Standalone radial overlay outside explorer.exe (tests WCA glass, TaskbarGlass, PureMatte, 3D bezels, hit-testing)
 .\build\stage\WinRings\WinRingsHost.exe --preview
 
-# Independent Tray Icon + 376x524 Control Flyout (connects to Host or --preview via WM_COPYDATA)
-.\build\stage\WinRings\WinRingsTools.exe --open
-
-# Cleanly exit Tray app without affecting the Ring
-.\build\stage\WinRings\WinRingsTools.exe --quit
+# Combined Tray + Handy-style Settings Window (destroys GPU/UI resources when closed)
+.\build\stage\WinRings\WinRingsHost.exe --open
 ```
 
 ### Opt-In Live Explorer Lifecycle Gate
@@ -89,7 +86,7 @@ Validates live injection, `--status` readiness (`ring=1`), `--toggle` open/close
 
 | Artifact | Path | Purpose |
 | :--- | :--- | :--- |
-| **User Config** | `%APPDATA%\WinRings\config.json` | JSON v3 user settings & pinned slots (`SwitcherConfig`) |
+| **User Config** | `%APPDATA%\WinRings\config.json` & `profiles\*.json` | JSON v6 global settings + standalone per-profile pin files (`SwitcherConfig`) |
 | **Favicon Cache** | `%APPDATA%\WinRings\icons\` | Cached website icons downloaded async by `SlotModel::FetchFaviconAsync` |
 | **Diagnostic Log** | `%APPDATA%\WinRings\shell_diag.log` | Host/shell handshake, trigger, DWM/WCA activation, and error telemetry |
 | **Safety Lock Registry** | `HKCU\Software\WinRings\HostSafety` | `CrashGuard` crash timestamps & `InjectionDisabled` flag (cleared via `--reset-safety`) |

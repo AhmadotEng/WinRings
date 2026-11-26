@@ -167,12 +167,14 @@ namespace
         return true;
     }
 
+    constexpr wchar_t kLegacyToolsFilename[] = L"WinRingsTools.exe";
+
     void StopRunningWinRingsHost(const std::wstring& installDir)
     {
-        const UINT wakeMsg = RegisterWindowMessageW(WINRINGS_TRAY_WAKE_MESSAGE_W);
+        const UINT wakeMsg = RegisterWindowMessageW(L"WinRings.Tray.Wake.v1");
         if (wakeMsg)
         {
-            HWND trayHwnd = FindWindowW(WINRINGS_TRAY_WINDOW_CLASS_W, nullptr);
+            HWND trayHwnd = FindWindowW(L"WinRings.Tray.Window.v1", nullptr);
             if (trayHwnd)
                 SendMessageTimeoutW(trayHwnd, wakeMsg, 2 /* quit */, 0, SMTO_ABORTIFHUNG, 1500, nullptr);
         }
@@ -207,7 +209,7 @@ namespace
                 SendMessageTimeoutW(hostHwnd, ctrlMsg, 2 /* WINRINGS_HOST_CTRL_EXIT */, 0, SMTO_ABORTIFHUNG, 2500, nullptr);
         }
 
-        // Wait briefly for running WinRingsHost.exe and WinRingsTools.exe processes to exit gracefully
+        // Wait briefly for running WinRingsHost.exe (or legacy WinRingsTools.exe) to exit gracefully
         bool anyRemaining = false;
         for (int attempt = 0; attempt < 12; ++attempt)
         {
@@ -219,7 +221,7 @@ namespace
                 for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
                 {
                     if (_wcsicmp(pe.szExeFile, WINRINGS_HOST_FILENAME_W) == 0 ||
-                        _wcsicmp(pe.szExeFile, WINRINGS_TOOLS_FILENAME_W) == 0)
+                        _wcsicmp(pe.szExeFile, kLegacyToolsFilename) == 0)
                     {
                         anyRemaining = true;
                         break;
@@ -244,7 +246,7 @@ namespace
                     if (pe.th32ProcessID == selfPid)
                         continue;
                     if (_wcsicmp(pe.szExeFile, WINRINGS_HOST_FILENAME_W) == 0 ||
-                        _wcsicmp(pe.szExeFile, WINRINGS_TOOLS_FILENAME_W) == 0)
+                        _wcsicmp(pe.szExeFile, kLegacyToolsFilename) == 0)
                     {
                         if (HANDLE proc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID))
                         {
@@ -259,7 +261,7 @@ namespace
         }
     }
 
-    bool CreateStartMenuShortcut(const std::wstring& targetExe)
+    bool CreateStartMenuShortcut(const std::wstring& targetExe, const std::wstring& args)
     {
         ComPtr<IShellLinkW> link;
         if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
@@ -267,6 +269,8 @@ namespace
             return false;
 
         link->SetPath(targetExe.c_str());
+        if (!args.empty())
+            link->SetArguments(args.c_str());
         link->SetDescription(L"WinRings Radial Switcher");
 
         ComPtr<IPersistFile> pf;
@@ -280,7 +284,6 @@ namespace
     bool WriteRegistryStrings(const std::wstring& installDir, bool addRunEntry)
     {
         const std::wstring hostExe = installDir + L"\\" + WINRINGS_HOST_FILENAME_W;
-        const std::wstring toolsExe = installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W;
         const std::wstring setupExe = installDir + L"\\" + WINRINGS_SETUP_FILENAME_W;
 
         if (addRunEntry)
@@ -294,11 +297,7 @@ namespace
                 RegSetValueExW(runKey, WINRINGS_PRODUCT_NAME_W, 0, REG_SZ,
                     reinterpret_cast<const BYTE*>(hostCmd.c_str()),
                     static_cast<DWORD>((hostCmd.size() + 1) * sizeof(wchar_t)));
-
-                const std::wstring trayCmd = L"\"" + toolsExe + L"\" --tray";
-                RegSetValueExW(runKey, L"WinRingsTray", 0, REG_SZ,
-                    reinterpret_cast<const BYTE*>(trayCmd.c_str()),
-                    static_cast<DWORD>((trayCmd.size() + 1) * sizeof(wchar_t)));
+                RegDeleteValueW(runKey, L"WinRingsTray");
                 RegCloseKey(runKey);
             }
         }
@@ -355,13 +354,12 @@ namespace
         if (!ExtractVerifiedPayload(inst, IDR_PAYLOAD_HOST, kHashWinRingsHost,
                 installDir + L"\\" + WINRINGS_HOST_FILENAME_W, err) ||
             !ExtractVerifiedPayload(inst, IDR_PAYLOAD_SHELL, kHashWinRingsShell,
-                installDir + L"\\" + WINRINGS_SHELL_FILENAME_W, err) ||
-            !ExtractVerifiedPayload(inst, IDR_PAYLOAD_TOOLS, kHashWinRingsTools,
-                installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W, err))
+                installDir + L"\\" + WINRINGS_SHELL_FILENAME_W, err))
         {
             outMessage = err;
             return false;
         }
+        DeleteFileW((installDir + L"\\" + kLegacyToolsFilename).c_str());
 
         // Copy Setup executable for Control Panel / Settings uninstall
         wchar_t selfPath[MAX_PATH]{};
@@ -374,7 +372,7 @@ namespace
 
         WriteRegistryStrings(installDir, addStartup);
         RegDeleteTreeW(HKEY_CURRENT_USER, WINRINGS_HOST_SAFETY_REGISTRY_W);
-        CreateStartMenuShortcut(installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W);
+        CreateStartMenuShortcut(installDir + L"\\" + WINRINGS_HOST_FILENAME_W, L"--open");
 
         if (launchAfter)
         {
@@ -392,7 +390,6 @@ namespace
                 }
             };
             spawnExe(installDir + L"\\" + WINRINGS_HOST_FILENAME_W, L"");
-            spawnExe(installDir + L"\\" + WINRINGS_TOOLS_FILENAME_W, L"--tray");
         }
 
         outMessage = L"Installed WinRings v" WINRINGS_PRODUCT_VERSION_STR_W L" to:\n" + installDir;
@@ -419,7 +416,7 @@ namespace
         bool scheduledRebootCleanup = false;
         const wchar_t* files[] = {
             WINRINGS_HOST_FILENAME_W,
-            WINRINGS_TOOLS_FILENAME_W,
+            kLegacyToolsFilename,
             WINRINGS_SHELL_FILENAME_W,
             WINRINGS_SETUP_FILENAME_W
         };

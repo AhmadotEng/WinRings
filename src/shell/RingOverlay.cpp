@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "../shared/SearchMatch.h"
+#include "../shared/SettingsLayoutMath.h"
 #include "../shared/WinRingsDeltaIpc.h"
 #include "../shared/WinRingsIdentity.h"
 #include "AppIndex.h"
@@ -521,6 +522,7 @@ namespace winrings
                     static_cast<int>(std::llround(m_centerScreenPhysical.x)),
                     static_cast<int>(std::llround(m_centerScreenPhysical.y)));
                 m_lastWcaRegionHash = 0;
+                UpdateOverlayHitRegion();
             }
             Render();
         }
@@ -963,11 +965,15 @@ namespace winrings
         }
 
         const RingGeometry geom = ActiveGeometry();
-        const double padDip = (std::min)(geom.outerRadius + 78.0,
-            (std::min)(workAreaDip.width, workAreaDip.height) * 0.48);
         const double cursorDipX = physicalX / m_dpiScale;
         const double cursorDipY = physicalY / m_dpiScale;
-        const PointD clampedDip = ClampRingCenter(cursorDipX, cursorDipY, padDip, workAreaDip);
+        const PointD clampedDip = m_openedForTrayPreview
+            ? ComputePreviewRingClampedCenter(cursorDipX, cursorDipY, geom.outerRadius, workAreaDip)
+            : ClampRingCenter(
+                cursorDipX,
+                cursorDipY,
+                (std::min)(geom.outerRadius + 78.0, (std::min)(workAreaDip.width, workAreaDip.height) * 0.48),
+                workAreaDip);
 
         const int physSize = static_cast<int>(std::llround(kOverlayDip * m_dpiScale));
         const int leftPx = static_cast<int>(std::llround((clampedDip.x - kCenterDip) * m_dpiScale));
@@ -979,6 +985,113 @@ namespace winrings
         SetWindowPos(m_hwnd, HWND_TOPMOST, leftPx, topPx, physSize, physSize, SWP_NOACTIVATE);
         if (m_wcaBackdropHwnd)
             SetWindowPos(m_wcaBackdropHwnd, m_hwnd, leftPx, topPx, physSize, physSize, SWP_NOACTIVATE);
+    }
+
+    void RingOverlay::SetOpenedForTrayPreview(bool trayPreview) noexcept
+    {
+        m_openedForTrayPreview = trayPreview;
+        UpdateOverlayHitRegion();
+    }
+
+    void RingOverlay::UpdateOverlayHitRegion() noexcept
+    {
+        if (!m_hwnd)
+            return;
+        if (!ShouldClipOverlayToActiveRegion(m_isOpen, IsDragOrReorderActive()))
+        {
+            if (m_overlayRegionClipped)
+            {
+                SetWindowRgn(m_hwnd, nullptr, TRUE);
+                m_overlayRegionClipped = false;
+                m_lastOverlayRegionHash = 0;
+            }
+            return;
+        }
+
+        const RingGeometry geom = ActiveGeometry();
+        const double hitRadiusDip = ComputePreviewOverlayHitRadiusDip(geom.outerRadius, kCenterDip);
+        const double scale = (std::max)(0.5, m_dpiScale);
+
+        uint64_t h = 0x517CC1B727220A95ULL;
+        h = HashMix(h, static_cast<uint64_t>(std::llround(scale * 100.0)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(hitRadiusDip * 4.0)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuBoundsDip.left * 2.0)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuBoundsDip.top * 2.0)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuBoundsDip.width * 2.0)));
+        h = HashMix(h, static_cast<uint64_t>(std::llround(m_submenuBoundsDip.height * 2.0)));
+        for (const auto& cardRect : m_submenuCardRects)
+        {
+            h = HashMix(h, static_cast<uint64_t>(std::llround(cardRect.left * 2.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(cardRect.top * 2.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(cardRect.width * 2.0)));
+            h = HashMix(h, static_cast<uint64_t>(std::llround(cardRect.height * 2.0)));
+        }
+
+        if (m_overlayRegionClipped && h == m_lastOverlayRegionHash)
+            return;
+
+        const double cxPx = kCenterDip * scale;
+        const double cyPx = kCenterDip * scale;
+        const double rPx = hitRadiusDip * scale;
+        HRGN combined = CreateEllipticRgn(
+            static_cast<int>(std::lround(cxPx - rPx)),
+            static_cast<int>(std::lround(cyPx - rPx)),
+            static_cast<int>(std::lround(cxPx + rPx)) + 1,
+            static_cast<int>(std::lround(cyPx + rPx)) + 1);
+        if (!combined)
+            return;
+
+        auto unionExpandedRect = [&](const RectD& rcDip) {
+            if (rcDip.width <= 1.0 || rcDip.height <= 1.0)
+                return;
+            const double lDip = (std::max)(0.0, rcDip.left - 24.0);
+            const double tDip = (std::max)(0.0, rcDip.top - 24.0);
+            const double rDip = (std::min)(kOverlayDip, rcDip.left + rcDip.width + 24.0);
+            const double bDip = (std::min)(kOverlayDip, rcDip.top + rcDip.height + 24.0);
+            const int l = static_cast<int>(std::lround(lDip * scale));
+            const int t = static_cast<int>(std::lround(tDip * scale));
+            const int r = static_cast<int>(std::lround(rDip * scale)) + 1;
+            const int b = static_cast<int>(std::lround(bDip * scale)) + 1;
+            if (r > l && b > t)
+            {
+                if (HRGN rr = CreateRectRgn(l, t, r, b))
+                {
+                    CombineRgn(combined, combined, rr, RGN_OR);
+                    DeleteObject(rr);
+                }
+            }
+        };
+
+        unionExpandedRect(m_submenuBoundsDip);
+        for (const auto& cardRect : m_submenuCardRects)
+            unionExpandedRect(cardRect);
+
+        if (SetWindowRgn(m_hwnd, combined, TRUE))
+        {
+            m_overlayRegionClipped = true;
+            m_lastOverlayRegionHash = h;
+        }
+        else
+        {
+            DeleteObject(combined);
+        }
+    }
+
+    void RingOverlay::RepositionTo(int physicalX, int physicalY)
+    {
+        if (!m_isOpen || !m_hwnd)
+            return;
+        const double prevDpi = m_dpiScale;
+        UpdateDpiAndPosition(physicalX, physicalY);
+        if (std::abs(m_dpiScale - prevDpi) > 0.01)
+        {
+            UpdateOverlayHitRegion();
+            Render();
+        }
+        else if (m_wcaBackdropHwnd && m_wcaBackdropActive)
+        {
+            SetWindowPos(m_wcaBackdropHwnd, m_hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
 
     bool RingOverlay::IsPointInActiveBounds(POINT screenPt) const noexcept
@@ -1099,6 +1212,7 @@ namespace winrings
         }
 
         Render();
+        UpdateOverlayHitRegion();
         if (m_wcaBackdropHwnd && m_wcaBackdropActive)
         {
             ShowWindow(m_wcaBackdropHwnd, SW_SHOWNOACTIVATE);
@@ -1129,6 +1243,7 @@ namespace winrings
         m_isOpen = false;
         m_isLockedOpen = false;
         m_openedForTrayPreview = false;
+        UpdateOverlayHitRegion();
         m_contextMenuOpen = false;
         m_pendingContextMenu = false;
         DismissActiveContextFlyout();
@@ -1183,6 +1298,8 @@ namespace winrings
         m_submenuArcLayout = {};
         m_submenuBoundsDip = {};
         m_submenuIsTitleColumn = false;
+        if (m_isOpen)
+            UpdateOverlayHitRegion();
     }
 
     void RingOverlay::OpenSubmenuForSlot(int slotIndex, PointD originDip)
@@ -1259,6 +1376,7 @@ namespace winrings
 
         m_submenuBoundsDip = ComputeUnionBounds(m_submenuCardRects);
         SyncDwmThumbnails();
+        UpdateOverlayHitRegion();
     }
 
     void RingOverlay::SyncDwmThumbnails()
@@ -1308,7 +1426,9 @@ namespace winrings
 
     void RingOverlay::UpdatePointer(int physicalX, int physicalY)
     {
-        if (!m_isOpen || (m_visibleSlots.empty() && m_searchResultSlots.empty()) ||
+        if (!m_isOpen)
+            return;
+        if ((m_visibleSlots.empty() && m_searchResultSlots.empty()) ||
             m_contextMenuOpen || m_dragActive || m_reorderActive || m_pressKind != PressKind::None)
             return;
 
@@ -1918,6 +2038,7 @@ namespace winrings
         }
 
         Render();
+        UpdateOverlayHitRegion();
     }
 
     void RingOverlay::StepAnimations()
@@ -2753,6 +2874,7 @@ namespace winrings
         {
             m_pendingContextMenu = false;
             m_contextMenuOpen = true;
+            UpdateOverlayHitRegion();
 
             POINT clientPt = screenPt;
             ScreenToClient(m_hwnd, &clientPt);
@@ -2973,6 +3095,7 @@ namespace winrings
             {
                 m_contextMenuOpen = false;
                 m_pendingContextMenu = false;
+                UpdateOverlayHitRegion();
                 return;
             }
             if (cmd == 0)
@@ -2983,11 +3106,13 @@ namespace winrings
                     continue;
                 }
                 m_contextMenuOpen = false;
+                UpdateOverlayHitRegion();
                 return;
             }
 
             m_contextMenuOpen = false;
             m_pendingContextMenu = false;
+            UpdateOverlayHitRegion();
 
             if (hasSlot && cmd >= CmdWinBase && cmd < CmdWinBase + 9)
             {
@@ -3237,6 +3362,7 @@ namespace winrings
         m_reorderWasUnpinned = false;
         m_reorderFromIndex = -1;
         m_reorderCurrentIndex = -1;
+        UpdateOverlayHitRegion();
         if (m_isOpen)
             Render();
     }
@@ -3247,6 +3373,7 @@ namespace winrings
         m_dragOverCenter = false;
         ResetDragSpringState();
         ClearSubmenu();
+        UpdateOverlayHitRegion();
         Render();
     }
 
@@ -3302,6 +3429,7 @@ namespace winrings
         ResetDragSpringState();
         for (size_t i = 0; i < m_slotScales.size(); ++i)
             m_slotScales[i] = kIdleSlotScale;
+        UpdateOverlayHitRegion();
         Render();
     }
 
@@ -3310,6 +3438,7 @@ namespace winrings
         m_dragActive = false;
         m_dragOverCenter = false;
         ResetDragSpringState();
+        UpdateOverlayHitRegion();
 
         const double dx = (screenPt.x - m_centerScreenPhysical.x) / m_dpiScale;
         const double dy = (screenPt.y - m_centerScreenPhysical.y) / m_dpiScale;
@@ -3528,8 +3657,10 @@ namespace winrings
                         m_selectedIndex = -1;
                         Render();
                         m_draggingOutFromRing = true;
+                        UpdateOverlayHitRegion();
                         RingDropTarget::StartFileDragOut(nullptr, dragPath);
                         m_draggingOutFromRing = false;
+                        UpdateOverlayHitRegion();
                         if (m_isOpen)
                             Dismiss();
                     }
@@ -3559,6 +3690,7 @@ namespace winrings
                             m_reorderCurrentIndex = m_pressSlotIndex;
                             m_reorderCursorDip = localDip;
                             ClearSubmenu();
+                            UpdateOverlayHitRegion();
                             Render();
                         }
                     }
@@ -3638,15 +3770,19 @@ namespace winrings
                 return 0;
             }
 
-            const int hitSlot = CalculateSectorIndex(dx, dy, static_cast<int>(m_visibleSlots.size()), m_config.deadzoneDip);
-            if (hitSlot >= 0)
+            const RingGeometry geom = ActiveGeometry();
+            if (IsRingSlotPressWithinOuterRadius(dist, m_config.deadzoneDip, geom.outerRadius))
             {
-                m_pressKind = PressKind::RingSlot;
-                m_pressSlotIndex = hitSlot;
-                m_pressSubIndex = -1;
-                m_pressScreenPt = screenPt;
-                m_selectedIndex = hitSlot;
-                SetCapture(m_hwnd);
+                const int hitSlot = CalculateSectorIndex(dx, dy, static_cast<int>(m_visibleSlots.size()), m_config.deadzoneDip);
+                if (hitSlot >= 0)
+                {
+                    m_pressKind = PressKind::RingSlot;
+                    m_pressSlotIndex = hitSlot;
+                    m_pressSubIndex = -1;
+                    m_pressScreenPt = screenPt;
+                    m_selectedIndex = hitSlot;
+                    SetCapture(m_hwnd);
+                }
             }
             return 0;
         }
@@ -3673,6 +3809,7 @@ namespace winrings
                 m_reorderCurrentIndex = -1;
                 m_pressKind = PressKind::None;
                 m_pressSlotIndex = -1;
+                UpdateOverlayHitRegion();
                 if (GetCapture() == m_hwnd)
                     ReleaseCapture();
 

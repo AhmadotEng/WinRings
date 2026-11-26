@@ -56,12 +56,13 @@ namespace winrings
         bool IsLockedOpen() const noexcept { return m_isLockedOpen; }
         bool IsDragOrReorderActive() const noexcept { return m_dragActive || m_draggingOutFromRing || m_reorderActive || m_contextMenuOpen || m_modalDialogOpen; }
         bool IsOpenedForTrayPreview() const noexcept { return m_openedForTrayPreview; }
-        void SetOpenedForTrayPreview(bool trayPreview) noexcept { m_openedForTrayPreview = trayPreview; }
+        void SetOpenedForTrayPreview(bool trayPreview) noexcept;
         void RefreshSlots(std::vector<RingSlot> slots);
         double DpiScale() const noexcept { return m_dpiScale; }
         bool IsPointInActiveBounds(POINT screenPt) const noexcept;
 
         void OpenAt(int physicalX, int physicalY, std::vector<RingSlot> slots, bool lockOpen);
+        void RepositionTo(int physicalX, int physicalY);
         void LockOpen() noexcept { m_isLockedOpen = true; }
         void UpdatePointer(int physicalX, int physicalY);
         void HandleScrollWheel(int wheelDelta);
@@ -131,6 +132,7 @@ namespace winrings
 
         RingGeometry ActiveGeometry() const noexcept;
         void UpdateDpiAndPosition(int physicalX, int physicalY);
+        void UpdateOverlayHitRegion() noexcept;
         AcrylicMaterialParams BuildAcrylicMaterial() const noexcept;
         ThemeColors BuildThemeColors() const noexcept;
         void RebuildLayoutAfterFilter();
@@ -240,6 +242,8 @@ namespace winrings
         bool m_isOpen = false;
         bool m_isLockedOpen = false;
         bool m_openedForTrayPreview = false;
+        bool m_overlayRegionClipped = false;
+        uint64_t m_lastOverlayRegionHash = 0;
         bool m_contextMenuOpen = false;
         bool m_pendingContextMenu = false;
         POINT m_pendingContextMenuPt{};

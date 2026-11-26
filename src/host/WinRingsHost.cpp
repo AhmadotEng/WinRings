@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <sddl.h>
@@ -21,6 +22,7 @@
 #include "../shared/WinRingsApi.h"
 #include "../shared/WinRingsConfig.h"
 #include "../shared/WinRingsDeltaIpc.h"
+#include "SettingsWindow.h"
 
 using namespace winrings;
 
@@ -131,6 +133,7 @@ namespace
         WTSUnregisterSessionNotificationFn unregisterSessionNotification = nullptr;
         bool sessionNotificationRegistered = false;
         UINT_PTR attemptCookie = 0;
+        winrings::host::SettingsHostUi ui;
     };
 
     HostRuntime g_runtime;
@@ -1090,6 +1093,7 @@ namespace
     void RequestStop()
     {
         g_runtime.exitPending = true;
+        g_runtime.ui.CloseWindow();
         if (g_runtime.initializationPending)
         {
             g_runtime.status = WINRINGS_HOST_STATUS_STOPPING;
@@ -1120,6 +1124,7 @@ namespace
                 IssueShutdownRequest(true);
             else
                 g_runtime.status = WINRINGS_HOST_STATUS_STARTING;
+            g_runtime.ui.NotifyHostStatusChanged();
             return;
         }
         g_runtime.status = WINRINGS_HOST_STATUS_READY;
@@ -1129,7 +1134,10 @@ namespace
             return;
         }
         if (!ReconcileInteractiveInput())
+        {
+            g_runtime.ui.NotifyHostStatusChanged();
             return;
+        }
         if (g_runtime.userPaused)
             ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, 1u));
         if (g_runtime.pendingToggle && !g_runtime.userPaused)
@@ -1137,6 +1145,7 @@ namespace
             if (SendShellCommand(WINRINGS_CMD_TOGGLE_RING))
                 g_runtime.pendingToggle = false;
         }
+        g_runtime.ui.NotifyHostStatusChanged();
     }
 
     void HandleDllStatus(WinRingsDllStatus status, DWORD explorerPid, UINT_PTR cookie)
@@ -1157,6 +1166,7 @@ namespace
             g_runtime.activationCommitted = false;
             CancelTimers();
             g_runtime.status = WINRINGS_HOST_STATUS_FAILED;
+            g_runtime.ui.NotifyHostStatusChanged();
             if (g_runtime.exitPending)
                 DestroyWindow(g_runtime.window);
             break;
@@ -1172,6 +1182,7 @@ namespace
                 g_runtime.status = WINRINGS_HOST_STATUS_STARTING;
             else
                 g_runtime.status = WINRINGS_HOST_STATUS_FAILED;
+            g_runtime.ui.NotifyHostStatusChanged();
             break;
         }
     }
@@ -1217,29 +1228,7 @@ namespace
             g_runtime.retryIndex = 0;
             BeginConnection(true);
         }
-    }
-
-    void LaunchSiblingTools(const wchar_t* args)
-    {
-        std::wstring toolsPath;
-        if (!ResolveSiblingBinary(WINRINGS_TOOLS_FILENAME_W, toolsPath))
-            return;
-        std::wstring cmd = L"\"" + toolsPath + L"\"";
-        if (args && args[0] != L'\0')
-        {
-            cmd.push_back(L' ');
-            cmd += args;
-        }
-        std::vector<wchar_t> buf(cmd.begin(), cmd.end());
-        buf.push_back(L'\0');
-        STARTUPINFOW si{ sizeof(si) };
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(toolsPath.c_str(), buf.data(), nullptr, nullptr, FALSE,
-            0, nullptr, nullptr, &si, &pi))
-        {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        }
+        g_runtime.ui.NotifyHostStatusChanged();
     }
 
     const wchar_t* StatusText(WinRingsHostStatus status)
@@ -1258,6 +1247,10 @@ namespace
 
     LRESULT CALLBACK HostWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
+        LRESULT uiResult = 0;
+        if (g_runtime.ui.HandleHostWindowMessage(window, message, wParam, lParam, uiResult))
+            return uiResult;
+
         if (message == WM_COPYDATA)
         {
             const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
@@ -1311,13 +1304,18 @@ namespace
             case WINRINGS_HOST_CTRL_SET_PAUSED:
                 g_runtime.userPaused = (lParam != 0);
                 if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
-                    return ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, g_runtime.userPaused ? 1u : 0u)) ? TRUE : FALSE;
+                    ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, g_runtime.userPaused ? 1u : 0u));
+                g_runtime.ui.NotifyHostStatusChanged();
                 return TRUE;
             case WINRINGS_HOST_CTRL_RESET_SAFETY:
                 if (!ResetSafetyState())
                     return FALSE;
                 if (g_runtime.status == WINRINGS_HOST_STATUS_SAFETY_DISABLED)
                     BeginConnection(true);
+                g_runtime.ui.NotifyHostStatusChanged();
+                return TRUE;
+            case WINRINGS_HOST_CTRL_OPEN_UI:
+                g_runtime.ui.OpenWindow(true);
                 return TRUE;
             default:
                 return FALSE;
@@ -1421,6 +1419,7 @@ namespace
             return 0;
 
         case WM_DESTROY:
+            g_runtime.ui.ShutdownTray();
             UnregisterSessionNotifications();
             PostQuitMessage(0);
             return 0;
@@ -1453,7 +1452,7 @@ namespace
         if (_wcsicmp(argv[1], L"--status") == 0) return LaunchCommand::Status;
         if (_wcsicmp(argv[1], L"--reload") == 0) return LaunchCommand::Reload;
         if (_wcsicmp(argv[1], L"--reset-safety") == 0) return LaunchCommand::ResetSafety;
-        if (_wcsicmp(argv[1], L"--settings") == 0) return LaunchCommand::Settings;
+        if (_wcsicmp(argv[1], L"--settings") == 0 || _wcsicmp(argv[1], L"--open") == 0) return LaunchCommand::Settings;
         if (_wcsicmp(argv[1], L"--version") == 0) return LaunchCommand::Version;
         if (_wcsicmp(argv[1], L"--preview") == 0) return LaunchCommand::Preview;
         return LaunchCommand::Invalid;
@@ -1471,7 +1470,7 @@ namespace
         if (!window)
             return ERROR_SERVICE_NOT_ACTIVE;
 
-        if (cmd == LaunchCommand::Toggle)
+        if (cmd == LaunchCommand::Toggle || cmd == LaunchCommand::Settings)
         {
             DWORD hostPid = 0;
             GetWindowThreadProcessId(window, &hostPid);
@@ -1487,6 +1486,7 @@ namespace
         case LaunchCommand::Status: ctrl = WINRINGS_HOST_CTRL_QUERY_DETAILS; break;
         case LaunchCommand::Reload: ctrl = WINRINGS_HOST_CTRL_RELOAD; break;
         case LaunchCommand::ResetSafety: ctrl = WINRINGS_HOST_CTRL_RESET_SAFETY; break;
+        case LaunchCommand::Settings: ctrl = WINRINGS_HOST_CTRL_OPEN_UI; break;
         default: break;
         }
 
@@ -1540,11 +1540,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         WriteParentConsole(L"WinRingsHost " WINRINGS_PRODUCT_VERSION_STR_W L" (ABI 1.0)");
         return 0;
     }
-    if (cmd == LaunchCommand::Settings)
-    {
-        LaunchSiblingTools(L"--open");
-        return 0;
-    }
     if (cmd == LaunchCommand::Preview)
     {
         return RunPreviewMode();
@@ -1554,6 +1549,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         return ERROR_BAD_ARGUMENTS;
     }
 
+    const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     g_runtime.instance = instance;
     g_runtime.hostControlMessage = RegisterWindowMessageW(WINRINGS_HOST_CONTROL_MESSAGE_W);
     g_runtime.shellStatusMessage = RegisterWindowMessageW(WINRINGS_SHELL_STATUS_MESSAGE_W);
@@ -1561,29 +1558,42 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     g_runtime.taskbarCreatedMessage = RegisterWindowMessageW(WINRINGS_TASKBAR_CREATED_MESSAGE_W);
     if (!g_runtime.hostControlMessage || !g_runtime.shellStatusMessage ||
         !g_runtime.shellCommandMessage || !g_runtime.taskbarCreatedMessage)
+    {
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return static_cast<int>(GetLastError());
+    }
 
     SetLastError(ERROR_SUCCESS);
     UniqueHandle instanceMutex(CreateMutexW(nullptr, TRUE, WINRINGS_HOST_MUTEX_W));
     const DWORD mutexErr = GetLastError();
     if (!instanceMutex && mutexErr != ERROR_ACCESS_DENIED)
+    {
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return static_cast<int>(mutexErr);
+    }
     if (mutexErr == ERROR_ALREADY_EXISTS || mutexErr == ERROR_ACCESS_DENIED)
     {
         if (cmd == LaunchCommand::Host)
+        {
+            if (SUCCEEDED(hrCo)) CoUninitialize();
             return 0;
-        return ForwardToExistingHost(cmd, g_runtime.hostControlMessage);
+        }
+        const int fwdRes = ForwardToExistingHost(cmd, g_runtime.hostControlMessage);
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+        return fwdRes;
     }
 
     if (cmd == LaunchCommand::Status)
     {
         WriteParentConsole(L"WinRingsHost: stopped");
         ReleaseMutex(instanceMutex.get());
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return ERROR_SERVICE_NOT_ACTIVE;
     }
     if (cmd == LaunchCommand::Exit)
     {
         ReleaseMutex(instanceMutex.get());
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return 0;
     }
 
@@ -1594,6 +1604,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
         ReleaseMutex(instanceMutex.get());
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return static_cast<int>(GetLastError());
     }
 
@@ -1603,6 +1614,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (!g_runtime.window)
     {
         ReleaseMutex(instanceMutex.get());
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return static_cast<int>(GetLastError());
     }
 
@@ -1616,6 +1628,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     {
         DestroyWindow(g_runtime.window);
         ReleaseMutex(instanceMutex.get());
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return ERROR_WRITE_FAULT;
     }
 
@@ -1623,10 +1636,70 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (cmd == LaunchCommand::Toggle)
         g_runtime.pendingToggle = true;
 
-    if (!noTray)
-        LaunchSiblingTools(L"--tray");
+    if (!noTray || cmd == LaunchCommand::Settings)
+    {
+        winrings::host::SettingsHostBridge bridge{};
+        bridge.queryEngineState = []() -> winrings::host::EngineMode {
+            if (g_runtime.status == WINRINGS_HOST_STATUS_SAFETY_DISABLED)
+                return winrings::host::EngineMode::SafetyLocked;
+            if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
+                return g_runtime.userPaused ? winrings::host::EngineMode::Paused : winrings::host::EngineMode::Active;
+            if (g_runtime.status == WINRINGS_HOST_STATUS_STARTING ||
+                g_runtime.status == WINRINGS_HOST_STATUS_INJECTING)
+                return winrings::host::EngineMode::Starting;
+            if (FindWindowExW(HWND_MESSAGE, nullptr, L"WinRings.Preview.Control.v1", nullptr))
+                return winrings::host::EngineMode::PreviewOnly;
+            return winrings::host::EngineMode::Stopped;
+        };
+        bridge.sendDelta = [](const WinRingsDeltaPacket& pkt) -> bool {
+            if (g_runtime.status == WINRINGS_HOST_STATUS_READY && ForwardDeltaToShell(pkt))
+                return true;
+            if (HWND previewCtrl = FindWindowExW(HWND_MESSAGE, nullptr, L"WinRings.Preview.Control.v1", nullptr))
+            {
+                COPYDATASTRUCT cds{};
+                cds.dwData = WINRINGS_COPYDATA_DELTA_V1;
+                cds.cbData = sizeof(WinRingsDeltaPacket);
+                cds.lpData = const_cast<WinRingsDeltaPacket*>(&pkt);
+                DWORD_PTR res = 0;
+                return SendMessageTimeoutW(previewCtrl, WM_COPYDATA, reinterpret_cast<WPARAM>(g_runtime.window),
+                    reinterpret_cast<LPARAM>(&cds), SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &res) != FALSE && res != 0;
+            }
+            return false;
+        };
+        bridge.setPaused = [](bool paused) {
+            g_runtime.userPaused = paused;
+            if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
+                ForwardDeltaToShell(MakeSimpleDelta(DeltaOp::SetRingPaused, paused ? 1u : 0u));
+            g_runtime.ui.NotifyHostStatusChanged();
+        };
+        bridge.toggleRingNow = []() -> bool {
+            if (!g_runtime.interactiveInput || g_runtime.userPaused || g_runtime.status != WINRINGS_HOST_STATUS_READY)
+                return false;
+            return SendShellCommand(WINRINGS_CMD_TOGGLE_RING);
+        };
+        bridge.resetSafetyAndStart = []() -> bool {
+            if (!ResetSafetyState())
+                return false;
+            if (g_runtime.status == WINRINGS_HOST_STATUS_SAFETY_DISABLED)
+                BeginConnection(true);
+            g_runtime.ui.NotifyHostStatusChanged();
+            return true;
+        };
+        bridge.restartHook = []() {
+            if (g_runtime.status == WINRINGS_HOST_STATUS_READY)
+                SendShellCommand(WINRINGS_CMD_RELOAD_CONFIG);
+            else if (g_runtime.status == WINRINGS_HOST_STATUS_FAILED)
+                BeginConnection(true);
+        };
+        bridge.requestExit = []() {
+            RequestStop();
+        };
+        g_runtime.ui.InitializeTray(instance, g_runtime.window, g_runtime.taskbarCreatedMessage, std::move(bridge));
+    }
 
     BeginConnection(true);
+    if (cmd == LaunchCommand::Settings)
+        g_runtime.ui.OpenWindow(true);
 
     MSG msg{};
     int result = 0;
@@ -1659,6 +1732,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         }
     }
 
+    g_runtime.ui.ShutdownTray();
     CancelTimers();
     g_runtime.explorer.clear();
     if (g_runtime.shellDll)
@@ -1666,5 +1740,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (g_runtime.window && IsWindow(g_runtime.window))
         DestroyWindow(g_runtime.window);
     ReleaseMutex(instanceMutex.get());
+    if (SUCCEEDED(hrCo))
+        CoUninitialize();
     return result;
 }

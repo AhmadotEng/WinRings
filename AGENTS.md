@@ -1,15 +1,15 @@
 # AGENTS.md — WinRings Engineering Guide
 
-Pure native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR) **Windows 11 Radial Switcher & Gesture Launcher** (`WinRingsHost.exe`, `WinRingsShell.dll`, `WinRingsTools.exe`, `WinRingsSetup.exe`).
+Pure native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR) **Windows 11 Radial Switcher & Gesture Launcher** (`WinRingsHost.exe`, `WinRingsShell.dll`, `WinRingsSetup.exe`).
 
 ---
 
 ## Core Engineering Methodology & Invariants
 
-1. **Pure logic first, Win32 wiring second:** Put geometry, hit-testing, theme material math, search ranking, slot matching, config parsing, and safety state machines into header-only `src/shared/*.h`. Cover every new algorithm in `tests/WinRingsTests.cpp` before wiring `src/shell/`, `src/host/`, `src/tools/`, or `src/setup/`.
-2. **Single visual source of truth:** All surface textures (`A4SAcrylic`, `TaskbarGlass`, `PureMatte`), arbitrary surface/accent colors, slider curves (`glassLevel`, `lightDarkMode`), strokes, and 3D glass bezel tokens live in `src/shared/RingThemeEngine.h` and drive the live `RingOverlay` directly (including side-by-side real-Ring preview from `TrayApp`).
+1. **Pure logic first, Win32 wiring second:** Put geometry, hit-testing, theme material math, search ranking, slot matching, config parsing, and safety state machines into header-only `src/shared/*.h`. Cover every new algorithm in `tests/WinRingsTests.cpp` before wiring `src/shell/`, `src/host/`, or `src/setup/`.
+2. **Single visual source of truth:** All surface textures (`A4SAcrylic`, `TaskbarGlass`, `PureMatte`), arbitrary surface/accent colors, slider curves (`glassLevel`, `lightDarkMode`), strokes, and 3D glass bezel tokens live in `src/shared/RingThemeEngine.h` and drive the live `RingOverlay` directly (including the real `RingOverlay` aligned over the reserved stage inside `SettingsWindow`).
 3. **Preserve the approved A4S native WCA material & 3D edges:** Keep `WinRings.WcaBackdrop.v1`'s native `ACCENT_ENABLE_ACRYLICBLURBEHIND` interior untouched (paint zero synthetic noise when WCA is active), clip `SetWindowRgn` inset by `1.0 px`, and bridge the perimeter on `WinRings.Overlay.v1` with the `2.0 DIP` antialiased edge-bridge, elevation shadow lip, and 3D glass bezel gradients.
-4. **Protect `explorer.exe`:** Keep the Tray Control Flyout (`TrayApp.cpp`) and heavy setup out-of-process inside `WinRingsTools.exe` (`--tray`, `--open`, `--quit`), keeping `WinRingsHost.exe` headless. Keep `WinRingsShell.dll` scoped strictly to the Radial Switcher (exports only `WinRings_GetApi` and `WinRings_RunPreview`; leave taskbar and Start Menu customization to separate companion tools). Validate changes via `--preview` and `Test-WinRingsProduct.ps1` before running live Explorer injection, and leave the running `explorer.exe` process undisturbed unless explicitly asked.
+4. **Protect `explorer.exe`:** Keep the Tray icon & on-demand Handy-style Settings window (`SettingsWindow.cpp`, created on open and destroyed/trimmed to 0% GPU on close) and heavy setup out-of-process inside `WinRingsHost.exe` (`--open`, `--settings`, `--no-tray`). Keep `WinRingsShell.dll` scoped strictly to the Radial Switcher (exports only `WinRings_GetApi` and `WinRings_RunPreview`; leave taskbar and Start Menu customization to separate companion tools). Validate changes via `--preview` and `Test-WinRingsProduct.ps1` before running live Explorer injection, and leave the running `explorer.exe` process undisturbed unless explicitly asked.
 5. **Compiler & native binary bar:** Compile all targets clean with `/std:c++17 /W4 /WX /MT /guard:cf` and maintain zero `.NET`/CLR imports.
 
 ---
@@ -19,8 +19,8 @@ Pure native C++17 (`x64`, static `/MT` CRT, zero `.NET`/CLR) **Windows 11 Radial
 Execute steps in order; do not report work complete until every required gate prints its pass sentinel:
 
 1. **Pure logic & unit tests:** Update `src/shared/*.h` and add deterministic assertions in `tests/WinRingsTests.cpp`.
-2. **Runtime implementation:** Wire shell, host, tools, or setup changes under `src/`.
-3. **Build all 5 targets:**
+2. **Runtime implementation:** Wire shell, host, or setup changes under `src/`.
+3. **Build all 4 targets:**
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\tools\Build-WinRings.ps1
    ```
@@ -32,7 +32,7 @@ Execute steps in order; do not report work complete until every required gate pr
    Done when output prints `Test-WinRingsProduct: ALL CHECKS PASSED` (verifies x64 PE headers, zero CLR imports, DLL exports, `--version`, `WinRingsAbiProbe: OK`, and `WinRingsTests: ALL PASSED`).
 5. **Safe UI & preview verification (no Explorer injection):**
    - `.\build\stage\WinRings\WinRingsHost.exe --preview`
-   - `.\build\stage\WinRings\WinRingsTools.exe --open` (and `--quit` to exit cleanly)
+   - `.\build\stage\WinRings\WinRingsHost.exe --open` (and `--exit` to exit cleanly)
 6. **Optional live Explorer test / install (only when explicitly requested or validating shell hooks):**
    - `powershell -ExecutionPolicy Bypass -File .\tools\Test-WinRingsLifecycle.ps1 -AllowExplorerInjection`
    - `.\build\stage\WinRingsSetup\WinRingsSetup.exe --install --silent`
@@ -41,8 +41,8 @@ Execute steps in order; do not report work complete until every required gate pr
 
 ## Context Pointers (Read On Demand by Task Domain)
 
-- **`docs/ARCHITECTURE.md`** — Consult when modifying process boundaries, headless `WinRingsHost.exe` vs independent `WinRingsTools.exe` Tray Flyout, Explorer injection/attempt-cookie handshake, `WinRingsDeltaIpc.h` / `WinRingsApi.h`, `CrashGuard`, `SlotModel`, `WindowTracker`, `AppIndex`, `DwmThumbPool`, or decomposing `RingOverlay.cpp`.
+- **`docs/ARCHITECTURE.md`** — Consult when modifying process boundaries, combined `WinRingsHost.exe` (supervisor + tray + on-demand `SettingsWindow.cpp`), Explorer injection/attempt-cookie handshake, `WinRingsDeltaIpc.h` / `WinRingsApi.h`, `CrashGuard`, `SlotModel`, `WindowTracker`, `AppIndex`, `DwmThumbPool`, or decomposing `RingOverlay.cpp`.
 - **`docs/VISUAL_SYSTEM.md`** — Consult when changing `SurfaceTexture` (`A4SAcrylic`, `TaskbarGlass`, `PureMatte`), native WCA acrylic backdrop, `AcrylicBackdrop` (`dwmcore`), `1.0 px`-inset regions, 3D glass rims, `RingThemeEngine.h`, or frosted noise texture.
 - **`docs/INTERACTION_AND_MATH.md`** — Consult when modifying `TriggerModel.h` / `InputEngine` triggers, solo modifier masking, click-vs-drag behavior, `RadialMath.h` geometry/corridors, OLE drag-and-drop (`DropTarget`), spring-loaded hover-to-open, drag-to-reorder, Explorer folder/Recycle Bin matching (`SlotMatching.h`), or 4-tier app search (`SearchMatch.h`).
 - **`docs/BUILDING_AND_TESTING.md`** — Consult when changing compiler flags/libraries, adding `.cpp` files to `Build-WinRings.ps1`, changing DLL exports/ABI, updating installer payloads, or reading `%APPDATA%\WinRings\shell_diag.log`.
-- **`docs/ROADMAP_AND_IDEAS.md`** — Consult when designing WinRings v3.1+ enhancements, proposing new ring interactions, or planning structural refactors.
+- **`docs/ROADMAP_AND_IDEAS.md`** — Consult when designing WinRings v4.1+ enhancements, proposing new ring interactions, or planning structural refactors.

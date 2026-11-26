@@ -299,6 +299,7 @@ namespace winrings
         const UINT normVk = NormalizeTriggerVk(kb->vkCode);
         const bool ringOpen = m_callbacks.isRingOpen && m_callbacks.isRingOpen();
         const bool sticky = m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen();
+        const bool trayPreview = m_callbacks.isTrayPreviewOpen && m_callbacks.isTrayPreviewOpen();
 
         if (isDown)
         {
@@ -381,8 +382,8 @@ namespace winrings
                 return CallNextHookEx(m_keyboardHook, code, wp, lp);
             }
 
-            // Type-to-find & keyboard navigation whenever the ring is open
-            if (ringOpen)
+            // Type-to-find & keyboard navigation whenever the ring is open (except when hosted over Settings UI)
+            if (ringOpen && !trayPreview)
             {
                 const bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
                 const bool ctrlOrAlt = ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) ||
@@ -533,6 +534,7 @@ namespace winrings
         const UINT msg = static_cast<UINT>(wp);
         const bool ringOpen = m_callbacks.isRingOpen && m_callbacks.isRingOpen();
         const bool sticky = m_callbacks.isRingLockedOpen && m_callbacks.isRingLockedOpen();
+        const bool trayPreview = m_callbacks.isTrayPreviewOpen && m_callbacks.isTrayPreviewOpen();
 
         if (msg == WM_MOUSEMOVE)
         {
@@ -563,7 +565,8 @@ namespace winrings
         }
 
         if (msg == WM_MOUSEWHEEL && ringOpen &&
-            m_config.scrollWheelMode != ScrollWheelBehavior::Disabled)
+            m_config.scrollWheelMode != ScrollWheelBehavior::Disabled &&
+            (!trayPreview || (m_callbacks.isPointInOverlay && m_callbacks.isPointInOverlay(ms->pt))))
         {
             const short delta = static_cast<short>(HIWORD(ms->mouseData));
             if (delta != 0)
@@ -655,8 +658,8 @@ namespace winrings
             return 1;
         }
 
-        // Click outside the overlay in sticky mode cancels only on clean click-release (not when dragging)
-        if (msg == WM_LBUTTONDOWN && ringOpen && sticky)
+        // Click outside the overlay in sticky mode cancels only on clean click-release (not when dragging or over Settings UI)
+        if (msg == WM_LBUTTONDOWN && ringOpen && sticky && !trayPreview)
         {
             const bool dragActive = m_callbacks.isRingDragActive && m_callbacks.isRingDragActive();
             if (!dragActive && (!m_callbacks.isPointInOverlay || !m_callbacks.isPointInOverlay(ms->pt)))

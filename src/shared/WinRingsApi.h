@@ -42,6 +42,7 @@ enum WinRingsHostControl : UINT32
     WINRINGS_HOST_CTRL_RESET_SAFETY  = 5,
     WINRINGS_HOST_CTRL_QUERY_DETAILS = 7,
     WINRINGS_HOST_CTRL_SET_PAUSED    = 8,
+    WINRINGS_HOST_CTRL_OPEN_UI       = 9,
 };
 
 enum WinRingsHostStatus : UINT32

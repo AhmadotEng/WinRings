@@ -8,6 +8,7 @@
 #include "../src/shared/RadialMath.h"
 #include "../src/shared/RingThemeEngine.h"
 #include "../src/shared/SearchMatch.h"
+#include "../src/shared/SettingsLayoutMath.h"
 #include "../src/shared/SlotMatching.h"
 #include "../src/shared/TriggerModel.h"
 #include "../src/shared/WinRingsConfig.h"
@@ -1217,6 +1218,64 @@ static void TestHiddenPinsSearchAndReorderMapping()
     RemoveDirectoryW(testDir.c_str());
 }
 
+static void TestSettingsStageAndPreviewMath()
+{
+    CHECK(!ShouldShowLiveRingForTab(0, false, true, false)); // 0 = General never shows live Ring
+    CHECK(ShouldShowLiveRingForTab(1, false, true, false));  // 1 = Appearance shows Ring
+    CHECK(ShouldShowLiveRingForTab(2, false, true, false));  // 2 = Profiles shows Ring
+    CHECK(!ShouldShowLiveRingForTab(1, true, true, false));  // Minimized hides Ring
+    CHECK(!ShouldShowLiveRingForTab(2, false, false, false)); // Inactive hides Ring
+    CHECK(!ShouldShowLiveRingForTab(1, false, true, true));  // Paused hides Ring
+
+    const POINT c100 = ComputeRingStageCenterPhysical(POINT{ 100, 50 }, 1.0, 488.0f, 16.0f, 784.0f, 508.0f);
+    CHECK(c100.x == 736 && c100.y == 312);
+
+    const POINT c150 = ComputeRingStageCenterPhysical(POINT{ 120, 80 }, 1.5, 488.0f, 16.0f, 784.0f, 508.0f);
+    CHECK(c150.x == 1074 && c150.y == 473);
+
+    const RectD work{ 0.0, 0.0, 1920.0, 1040.0 };
+    const PointD interior = ComputePreviewRingClampedCenter(736.0, 312.0, 149.6, work);
+    CHECK(std::abs(interior.x - 736.0) < 0.001 && std::abs(interior.y - 312.0) < 0.001);
+
+    const PointD edge = ComputePreviewRingClampedCenter(20.0, 1030.0, 149.6, work);
+    CHECK(std::abs(edge.x - 157.6) < 0.001);
+    CHECK(std::abs(edge.y - (1040.0 - 157.6)) < 0.001);
+
+    const double hitDefault = ComputePreviewOverlayHitRadiusDip(149.6, 380.0);
+    CHECK(std::abs(hitDefault - 177.6) < 0.001);
+    const double hitClampedMax = ComputePreviewOverlayHitRadiusDip(390.0, 380.0);
+    CHECK(std::abs(hitClampedMax - 380.0) < 0.001);
+    const double hitClampedMin = ComputePreviewOverlayHitRadiusDip(-20.0, 380.0);
+    CHECK(std::abs(hitClampedMin - 24.0) < 0.001);
+
+    CHECK(ShouldClipOverlayToActiveRegion(true, false));
+    CHECK(!ShouldClipOverlayToActiveRegion(false, false));
+    CHECK(!ShouldClipOverlayToActiveRegion(true, true));
+
+    CHECK(!IsRingSlotPressWithinOuterRadius(20.0, 32.0, 149.6));
+    CHECK(IsRingSlotPressWithinOuterRadius(96.0, 32.0, 149.6));
+    CHECK(IsRingSlotPressWithinOuterRadius(160.0, 32.0, 149.6));
+    CHECK(!IsRingSlotPressWithinOuterRadius(165.0, 32.0, 149.6));
+
+    CHECK(std::abs(ResolveSidebarIconHoverAlpha(false, false) - 0.0f) < 0.001f);
+    CHECK(std::abs(ResolveSidebarIconHoverAlpha(false, true) - 0.45f) < 0.001f);
+    CHECK(std::abs(ResolveSidebarIconHoverAlpha(true, true) - 1.0f) < 0.001f);
+    CHECK(std::abs(ResolveSidebarIconHoverAlpha(true, false) - 1.0f) < 0.001f);
+
+    CHECK(ShouldFooterStatusClickTogglePause(true, false));
+    CHECK(ShouldFooterStatusClickTogglePause(false, true));
+    CHECK(!ShouldFooterStatusClickTogglePause(false, false));
+
+    CHECK(std::abs(ComputeUnifiedProfilesCardBottomDip(184.0f, 0, 28.0f, 4.0f, 512.0f) - 184.0f) < 0.001f);
+    CHECK(std::abs(ComputeUnifiedProfilesCardBottomDip(184.0f, 2, 28.0f, 4.0f, 512.0f) - 248.0f) < 0.001f);
+    CHECK(std::abs(ComputeUnifiedProfilesCardBottomDip(184.0f, 4, 28.0f, 4.0f, 512.0f) - 304.0f) < 0.001f);
+    CHECK(std::abs(ComputeUnifiedProfilesCardBottomDip(184.0f, 20, 28.0f, 4.0f, 512.0f) - 512.0f) < 0.001f);
+
+    CHECK(!ShouldShowProfileDeleteAction(true, false));  // default: Reset only
+    CHECK(!ShouldShowProfileDeleteAction(false, true));  // SMenu: Reset only
+    CHECK(ShouldShowProfileDeleteAction(false, false));  // custom: Reset + Delete
+}
+
 int wmain()
 {
     TestRadialMath();
@@ -1231,6 +1290,7 @@ int wmain()
     TestSlotMatchingAndPreviews();
     TestDragSpringAndReorder();
     TestHiddenPinsSearchAndReorderMapping();
+    TestSettingsStageAndPreviewMath();
 
     if (g_failures == 0)
     {

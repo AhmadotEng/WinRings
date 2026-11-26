@@ -14,6 +14,7 @@ namespace winrings
         {
             std::function<bool()> isRingOpen;
             std::function<bool()> isRingLockedOpen;
+            std::function<bool()> isTrayPreviewOpen;
             std::function<bool()> isRingDragActive;
             std::function<bool(POINT screenPt)> isPointInOverlay;
             std::function<double()> getOverlayDpiScale;
