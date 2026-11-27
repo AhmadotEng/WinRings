@@ -78,9 +78,81 @@ namespace winrings::host
             CmdTogglePauseOrStart = 1001,
             CmdOpenRing = 1002,
             CmdOpenSettings = 1003,
-            CmdRestartHook = 1004,
-            CmdExitAll = 1005
+            CmdToggleRunAtStartup = 1004,
+            CmdRestartHook = 1005,
+            CmdExitAll = 1006
         };
+
+        constexpr wchar_t kStartupRunSubkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        constexpr wchar_t kStartupApprovedSubkey[] =
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+        bool IsRunAtStartupEnabled() noexcept
+        {
+            HKEY runKey = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupRunSubkey, 0, KEY_QUERY_VALUE, &runKey) != ERROR_SUCCESS)
+                return false;
+
+            DWORD type = 0;
+            DWORD cb = 0;
+            const LSTATUS q = RegQueryValueExW(runKey, WINRINGS_PRODUCT_NAME_W, nullptr, &type, nullptr, &cb);
+            RegCloseKey(runKey);
+            if (q != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || cb <= sizeof(wchar_t))
+                return false;
+
+            HKEY approvedKey = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupApprovedSubkey, 0, KEY_QUERY_VALUE, &approvedKey) == ERROR_SUCCESS)
+            {
+                BYTE state[12]{};
+                DWORD stateType = 0;
+                DWORD stateCb = sizeof(state);
+                const LSTATUS aq = RegQueryValueExW(approvedKey, WINRINGS_PRODUCT_NAME_W, nullptr, &stateType, state, &stateCb);
+                RegCloseKey(approvedKey);
+                if (aq == ERROR_SUCCESS && stateType == REG_BINARY && stateCb >= 1 && (state[0] & 0x01u) != 0u)
+                    return false;
+            }
+            return true;
+        }
+
+        void SetRunAtStartupEnabled(bool enable)
+        {
+            if (enable)
+            {
+                wchar_t exePath[MAX_PATH * 4]{};
+                const DWORD len = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
+                if (len == 0 || len >= std::size(exePath))
+                    return;
+
+                HKEY runKey = nullptr;
+                if (RegCreateKeyExW(HKEY_CURRENT_USER, kStartupRunSubkey, 0, nullptr, 0,
+                    KEY_SET_VALUE, nullptr, &runKey, nullptr) == ERROR_SUCCESS)
+                {
+                    const std::wstring cmd = L"\"" + std::wstring(exePath, len) + L"\"";
+                    RegSetValueExW(runKey, WINRINGS_PRODUCT_NAME_W, 0, REG_SZ,
+                        reinterpret_cast<const BYTE*>(cmd.c_str()),
+                        static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+                    RegDeleteValueW(runKey, L"WinRingsTray");
+                    RegCloseKey(runKey);
+                }
+
+                HKEY approvedKey = nullptr;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupApprovedSubkey, 0, KEY_SET_VALUE, &approvedKey) == ERROR_SUCCESS)
+                {
+                    RegDeleteValueW(approvedKey, WINRINGS_PRODUCT_NAME_W);
+                    RegCloseKey(approvedKey);
+                }
+            }
+            else
+            {
+                HKEY runKey = nullptr;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupRunSubkey, 0, KEY_SET_VALUE, &runKey) == ERROR_SUCCESS)
+                {
+                    RegDeleteValueW(runKey, WINRINGS_PRODUCT_NAME_W);
+                    RegDeleteValueW(runKey, L"WinRingsTray");
+                    RegCloseKey(runKey);
+                }
+            }
+        }
 
         struct SurfaceSwatch
         {
@@ -689,6 +761,9 @@ namespace winrings::host
             AppendMenuW(menu, MF_STRING | (mode == EngineMode::Active ? 0u : MF_GRAYED), CmdOpenRing, L"Open Ring Now");
             AppendMenuW(menu, MF_STRING, CmdOpenSettings, L"Open WinRings Settings");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            const bool runAtStartup = IsRunAtStartupEnabled();
+            AppendMenuW(menu, MF_STRING | (runAtStartup ? MF_CHECKED : MF_UNCHECKED),
+                CmdToggleRunAtStartup, L"Run when my computer starts");
             AppendMenuW(menu, MF_STRING, CmdRestartHook, L"Reload Config && Ring Hook");
             AppendMenuW(menu, MF_STRING, CmdExitAll, L"Exit WinRings");
 
@@ -722,6 +797,9 @@ namespace winrings::host
                 break;
             case CmdOpenSettings:
                 OpenWindow(true);
+                break;
+            case CmdToggleRunAtStartup:
+                SetRunAtStartupEnabled(!runAtStartup);
                 break;
             case CmdRestartHook:
                 if (bridge.restartHook)
